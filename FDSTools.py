@@ -33,17 +33,19 @@ def readFRec(infile,fmt):
     return result
 
 
-def read_bndf(fname,max_time=np.Inf):
+def read_bndf(fname,max_time=np.Inf, patches_only=False,statistics=None):
     fin = open(fname,'rb')
     quantity = readFRec(fin,'s')
     short_name = readFRec(fin,'s')
     units = readFRec(fin,'s')
-    n_patch = readFRec(fin,'I')
+    n_patch = readFRec(fin,'i')
     patch_extents = []
     for n in range(0,n_patch):
-        temp = np.array(readFRec(fin,'I'))
+        temp = readFRec(fin,'i')
         patch_extents.append(temp)
 
+    if patches_only:
+        return patch_extents
     Q=[]
     T  = []
     while True:
@@ -56,7 +58,14 @@ def read_bndf(fname,max_time=np.Inf):
             temp = np.array(readFRec(fin,'f'))
             Q[-1].append(temp)
     fin.close()
-    return (quantity, np.array(T),Q, np.hstack(patch_extents))
+    if statistics is not None:
+        if statistics='max':
+            Q = np.amax(Q,axis=0)
+        elif statistics='min':
+            Q = np.amin(Q,axis=0)
+        elif statistics='mean':
+            Q = np.mean(Q,axis=0)
+    return quantity, T,Q, patch_extents
 
 
 
@@ -79,7 +88,6 @@ def read_prt(fname,max_time=np.Inf):
     T  = []
     diam =[]
     while True:
-
         Time  = readFRec(fin,'f')
         if Time == None or Time>max_time:
             break
@@ -104,7 +112,7 @@ def parse_smv(fname):
     def find_keyword(lines,keyword):
         return [n for n,line in enumerate(lines) if line.startswith(keyword)]
 
-    # findgrid definitions
+    # find grid definitions
     igrid = find_keyword(lines,"GRID")
     ipdim = find_keyword(lines,"PDIM")
     itrnx = find_keyword(lines,"TRNX")
@@ -119,6 +127,7 @@ def parse_smv(fname):
         trnx = [float(num.split()[1]) for num in lines[itrnx[n]+2:itrnx[n]+ibar+2]]
         trny = [float(num.split()[1]) for num in lines[itrny[n]+2:itrny[n]+jbar+2]]
         trnz = [float(num.split()[1]) for num in lines[itrnz[n]+2:itrnz[n]+kbar+2]]
+
         grid = {'ibar': ibar,
                 'jbar': jbar,
                 'kbar': kbar,
@@ -133,10 +142,67 @@ def parse_smv(fname):
                 'trnz': trnz
                 }
         grids.append(grid)
-        
-    return grids
+
+
+    # find output files
+    ibndf = find_keyword(lines,"BNDF")
+    islcf = find_keyword(lines,"SLCF")
+
+    bndfs = []
+    slcfs = []
+
+    for n,ind in enumerate(islcf):
+        # SLCF     1 # STRUCTURED &     0    46     0   109     7     7
+        slcf = {}
+        nm, imin, imax, jmin, jmax, kmin, kmax = [int(num) for num in lines[ind].split() if num.isnumeric()] 
+        slcf['fname'] = lines[ind+1].strip()
+        slcf['quantity'] = lines[ind+2].strip()
+        slcf['short_name'] = lines[ind+3].strip()
+        slcf['units'] = lines[ind+4].strip()
+        slcf['nm'] = nm
+        slcf['imin'] = imin
+        slcf['imax'] = imax 
+        slcf['jmin'] = jmin
+        slcf['jmax'] = jmax
+        slcf['kmin'] = kmin
+        slcf['kmax'] = kmax
+        slcfs.append(slcf)
+
+    for n,ind in enumerate(ibndf):
+        # BNDF     1     1
+        bndf = {}
+        nm, _ = [int(num) for num in lines[ind].split() if num.isnumeric()] 
+        bndf['fname'] = lines[ind+1].strip()
+        bndf['quantity'] = lines[ind+2].strip()
+        bndf['short_name'] = lines[ind+3].strip()
+        bndf['units'] = lines[ind+4].strip()
+        bndf['nm'] = nm
+        bndf['patches'] = read_bndf(bndf['fname'],patches_only=True)
+        bndfs.append(bndf)
+
+    return grids,slcfs,bndfs
+
+
+    
+
+def get_data_from_slcfs():
+    yield
+
+def proc_commandline():
+    import argparse
+    parser = argparse.ArgumentParser(description='FDS Tools')
+    parser.add_argument('fname', help='Smokeview filename')
+    parser.add_argument('-o', help='Output filename')
+    parser.add_argument('-t','--type',help='Type of query [slcf,bndf,prt5]')
+    parser.add_argument('--pbx',help='X-value',type=float)
+    parser.add_argument('--pby',help='Y-value',type=float)
+    parser.add_argument('--pbz',help='Z-value',type=float)
+    parser.add_argument('-s','--statistics',help='Type of statistics [max,min,mean] default: None')
+    args = parser.parse_args()
+    return args
 
 if __name__ == "__main__":
+    args =proc_commandline()
     if len(sys.argv)<2:
         sys.exit("Give a file as argument")
     if sys.argv[1].endswith(".prt5"):
@@ -148,5 +214,5 @@ if __name__ == "__main__":
         print(quantity)
         print(patches)
     elif sys.argv[1].endswith(".smv"):    
-        grids = parse_smv(sys.argv[1])
-        print(grids)
+        grids,slcfs,bndfs = parse_smv(sys.argv[1])
+        print(grids,slcfs,bndfs)
