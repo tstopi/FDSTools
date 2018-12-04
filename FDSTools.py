@@ -33,6 +33,33 @@ def readFRec(infile,fmt):
     return result
 
 
+def readSLCF(fname,max_time=np.Inf):
+    fin = open(fname,'rb')
+
+    quantity  =readFRec(fin,'s')
+    short_name=readFRec(fin,'s')
+    units     =readFRec(fin,'s')
+    I1,I2,J1,J2,K1,K2=readFRec(fin,'I')
+    N = (I2-I1+1)*(J2-J1)*(K2-K1)
+    T  = []
+    Q  = []
+    while True:
+
+        Time  = readFRec(fin,'f')
+        if Time == None or Time>max_time:
+            break
+        q    = np.array(readFRec(fin,'f'))
+        if len(q)>N:
+            q= q.reshape(I2-I1+1,J2-J1+1,K2-K1+1,order='F')
+        else:
+            q= q.reshape(I2-I1,J2-J1,K2-K1,order='F') #
+        Q.append(q)
+        T.append(Time)
+    fin.close()
+    return np.array(T),np.array(Q)
+
+
+
 def read_bndf(fname,max_time=np.Inf, patches_only=False,statistics=None):
     fin = open(fname,'rb')
     quantity = readFRec(fin,'s')
@@ -55,8 +82,9 @@ def read_bndf(fname,max_time=np.Inf, patches_only=False,statistics=None):
         T.append(Time)
         Q.append([])
         for n in range(0,n_patch):
+            I1,I2,J1,J2,K1,K2,IOR,NB,NM = patch_extents[n]
             temp = np.array(readFRec(fin,'f'))
-            Q[-1].append(temp)
+            Q[-1].append(temp.reshape(I2-I1+1,J2-J1+1,K2-K1+1,order='F'))
     fin.close()
     if statistics is not None:
         if statistics='max':
@@ -65,7 +93,7 @@ def read_bndf(fname,max_time=np.Inf, patches_only=False,statistics=None):
             Q = np.amin(Q,axis=0)
         elif statistics='mean':
             Q = np.mean(Q,axis=0)
-    return quantity, T,Q, patch_extents
+    return quantity, T,np.array(Q), patch_extents
 
 
 
