@@ -84,6 +84,14 @@ class CADCFDProxyProperties(PropertyGroup):
     preset: EnumProperty(name="Preset", items=PRESET_ITEMS, default="CUSTOM")
     voxel_size: FloatProperty(
         name="Voxel size", default=0.02, min=1e-5, soft_max=1.0, unit="LENGTH")
+    fill_volume: BoolProperty(
+        name="Fill volume", default=True,
+        description="Fill the interior so Volume→Mesh yields a solid envelope "
+                    "(needs reasonably closed input; Phase 6 close helps). "
+                    "Disable for a thin band around open surfaces")
+    interior_band_width: FloatProperty(
+        name="Interior band", default=3.0, min=0.5, soft_max=10.0,
+        description="SDF band thickness inside the surface, in voxels")
     clearance: FloatProperty(
         name="Clearance", default=0.0, min=0.0, unit="LENGTH",
         description="Outward SDF offset around the source (external mode)")

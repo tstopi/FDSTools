@@ -37,7 +37,7 @@ def generate_proxy(context, props, report=None):
     cleanup.clean(sources, props)
 
     _say("Building volume (SDF)")
-    grid = volume.mesh_to_sdf(sources, props)
+    grid = volume.mesh_to_sdf(context, sources, props)
 
     if props.mode == "EXTERNAL":
         volume.dilate(grid, props.clearance)

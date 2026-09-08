@@ -17,7 +17,13 @@ for the full development plan.
 - **Phase 3 — geometry cleanup.** Done (`core/cleanup.py`). bmesh: merge by
   distance, dissolve degenerate, delete loose, drop zero-area faces, recalculate
   normals.
-- **Phases 4–15** — stubs raising `NotImplementedError` until their phase lands.
+- **Phase 4 — Mesh→Volume (SDF).** Done (`core/volume.py`). Joins the cleaned
+  meshes and runs a Mesh-to-Volume modifier into an OpenVDB grid. Note: defaults
+  to **fill** (not band) so Volume→Mesh yields a solid envelope — a deliberate
+  deviation from the plan's band default, since band-only gives double-walled
+  shells. Phase 6 close makes fill robust on open shells.
+- **Phases 5–15** — stubs raising `NotImplementedError` until their phase lands
+  (dilate/close no-op at zero distance, so a default run passes through).
 
 ## Layout
 
