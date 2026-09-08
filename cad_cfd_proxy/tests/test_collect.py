@@ -107,5 +107,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:  # noqa: BLE001
+        # Re-raise so Blender's --python-exit-code produces a non-zero exit.
         print("collect test: FAIL: %s" % exc)
-        sys.exit(1)
+        raise

@@ -42,5 +42,13 @@ under **CAD→CFD**.
 ## Test
 
 ```sh
+# all tests in one process
+blender --background --factory-startup --python-exit-code 1 \
+    --python cad_cfd_proxy/tests/run_all.py
+
+# or a single test
 blender --background --factory-startup --python cad_cfd_proxy/tests/test_smoke.py
 ```
+
+CI (`.github/workflows/ci.yml`) byte-compiles the addon and runs `run_all.py`
+against Blender on every push.
