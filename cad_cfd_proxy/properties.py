@@ -69,6 +69,17 @@ class CADCFDProxyProperties(PropertyGroup):
         name="Domain padding", default=0.1, min=0.0, unit="LENGTH",
         description="Padding around the bounding box when no domain object is set")
 
+    # --- cleanup (phase 3) ---
+    merge_distance: FloatProperty(
+        name="Merge distance", default=1e-4, min=0.0, soft_max=0.01, unit="LENGTH",
+        description="Weld vertices closer than this (0 disables)")
+    delete_loose: BoolProperty(
+        name="Delete loose", default=True,
+        description="Remove vertices/edges not bounding any face")
+    fix_normals: BoolProperty(
+        name="Recalculate normals", default=True,
+        description="Make face normals consistent/outward (needed for correct SDF sign)")
+
     # --- volume / SDF (phases 4, 5, 6) ---
     preset: EnumProperty(name="Preset", items=PRESET_ITEMS, default="CUSTOM")
     voxel_size: FloatProperty(

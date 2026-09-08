@@ -14,7 +14,10 @@ for the full development plan.
 - **Phase 2 — input processing.** Done (`core/collect.py`). Realizes instances,
   applies modifiers, and converts curves/text/surfaces/metaballs to mesh via the
   dependency graph, into a `CADCFD_work` collection — originals untouched.
-- **Phases 3–15** — stubs raising `NotImplementedError` until their phase lands.
+- **Phase 3 — geometry cleanup.** Done (`core/cleanup.py`). bmesh: merge by
+  distance, dissolve degenerate, delete loose, drop zero-area faces, recalculate
+  normals.
+- **Phases 4–15** — stubs raising `NotImplementedError` until their phase lands.
 
 ## Layout
 

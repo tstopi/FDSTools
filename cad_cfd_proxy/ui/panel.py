@@ -31,6 +31,13 @@ class CADCFD_PT_main(Panel):
                 box.prop(props, "domain_padding")
 
         box = layout.box()
+        box.label(text="Cleanup")
+        col = box.column(align=True)
+        col.prop(props, "merge_distance")
+        col.prop(props, "delete_loose")
+        col.prop(props, "fix_normals")
+
+        box = layout.box()
         box.label(text="Volume")
         box.prop(props, "preset")
         col = box.column(align=True)
