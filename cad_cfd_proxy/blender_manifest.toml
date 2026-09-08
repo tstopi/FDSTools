@@ -1,0 +1,16 @@
+schema_version = "1.0.0"
+
+id = "cad_cfd_proxy"
+version = "0.1.0"
+name = "CAD → CFD Proxy Mesh"
+tagline = "Simplified proxy meshes from CAD assemblies for OpenFOAM and FDS"
+maintainer = "tstopi"
+type = "add-on"
+
+# Blender version support. NOTE: confirm the actual minimum against the target
+# build — Mesh-to-Volume / Volume-to-Mesh node identifiers and sockets must be
+# verified on that build (see compat.py).
+blender_version_min = "4.2.0"
+
+license = ["SPDX:GPL-3.0-or-later"]
+tags = ["Mesh", "Modeling", "Import-Export"]
