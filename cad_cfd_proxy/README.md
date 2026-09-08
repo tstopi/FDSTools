@@ -9,9 +9,12 @@ for the full development plan.
 
 ## Status
 
-**Phase 1 — scaffolding.** The addon registers, shows its panel and diagnostics,
-and wires the pipeline together. The pipeline phases themselves are stubs that
-raise `NotImplementedError` until their phase lands.
+- **Phase 1 — scaffolding.** Done. Registers, shows panel + diagnostics, wires
+  the pipeline together.
+- **Phase 2 — input processing.** Done (`core/collect.py`). Realizes instances,
+  applies modifiers, and converts curves/text/surfaces/metaballs to mesh via the
+  dependency graph, into a `CADCFD_work` collection — originals untouched.
+- **Phases 3–15** — stubs raising `NotImplementedError` until their phase lands.
 
 ## Layout
 

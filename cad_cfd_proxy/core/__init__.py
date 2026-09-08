@@ -8,10 +8,7 @@ Phase 1 scaffold and raises :class:`NotImplementedError` until its phase lands.
 """
 
 from . import collect, cleanup, volume, domain, surface, validate, export
-
-
-class PipelineError(RuntimeError):
-    """Raised when a pipeline phase cannot complete."""
+from .errors import PipelineError  # noqa: F401 (re-exported)
 
 
 def generate_proxy(context, props, report=None):
@@ -34,13 +31,13 @@ def generate_proxy(context, props, report=None):
             report({"INFO"}, msg)
 
     _say("Collecting source geometry")
-    source = collect.gather(context, props)
+    sources = collect.gather(context, props)
 
     _say("Cleaning geometry")
-    cleanup.clean(source, props)
+    cleanup.clean(sources, props)
 
     _say("Building volume (SDF)")
-    grid = volume.mesh_to_sdf(source, props)
+    grid = volume.mesh_to_sdf(sources, props)
 
     if props.mode == "EXTERNAL":
         volume.dilate(grid, props.clearance)
