@@ -30,5 +30,9 @@ class ValidationReport(object):
 
 
 def check(obj, props):
-    """Run validation on *obj*, return a :class:`ValidationReport`. TODO(phase-12)."""
-    raise NotImplementedError("validate.check is a Phase 12 stub")
+    """Run validation on *obj*, return a :class:`ValidationReport`. TODO(phase-12).
+
+    Pending: returns an all-unknown report so the pipeline runs end-to-end. The
+    real watertight/manifold/self-intersection checks land in Phase 12.
+    """
+    return ValidationReport()

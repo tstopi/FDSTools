@@ -17,9 +17,11 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from cad_cfd_proxy.tests import test_smoke, test_collect, test_cleanup, test_volume
+from cad_cfd_proxy.tests import (
+    test_smoke, test_collect, test_cleanup, test_volume, test_generate,
+)
 
-for module in (test_smoke, test_collect, test_cleanup, test_volume):
+for module in (test_smoke, test_collect, test_cleanup, test_volume, test_generate):
     print("=== %s ===" % module.__name__)
     module.main()
 

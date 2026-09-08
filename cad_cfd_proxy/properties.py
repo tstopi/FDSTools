@@ -101,6 +101,9 @@ class CADCFDProxyProperties(PropertyGroup):
                     "smaller than this")
 
     # --- surface (phases 8, 9, 10) ---
+    surface_threshold: FloatProperty(
+        name="Iso threshold", default=0.5, min=0.0, max=1.0,
+        description="Grid value at the extracted isosurface (Volume→Mesh)")
     adaptivity: FloatProperty(name="Adaptivity", default=0.0, min=0.0, max=1.0)
     smooth_iterations: IntProperty(name="Smooth iterations", default=2, min=0, max=100)
     smooth_strength: FloatProperty(name="Smooth strength", default=0.5, min=0.0, max=1.0)

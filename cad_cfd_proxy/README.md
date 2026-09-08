@@ -22,8 +22,12 @@ for the full development plan.
   to **fill** (not band) so Volume→Mesh yields a solid envelope — a deliberate
   deviation from the plan's band default, since band-only gives double-walled
   shells. Phase 6 close makes fill robust on open shells.
-- **Phases 5–15** — stubs raising `NotImplementedError` until their phase lands
-  (dilate/close no-op at zero distance, so a default run passes through).
+- **Phase 8 — Volume→Mesh.** Done (`core/surface.py`). Volume-to-Mesh modifier
+  on the SDF grid, baked to a real watertight/manifold mesh. **The EXTERNAL
+  pipeline now runs end-to-end** (collect → cleanup → volume → surface).
+- **Phases 5–7, 9–15** — pending. Dilate/close no-op at zero distance;
+  smoothing/decimation/validate are graceful no-ops so a default run completes.
+  Internal-mode (Phase 7) still raises until implemented.
 
 ## Layout
 

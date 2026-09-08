@@ -51,6 +51,7 @@ class CADCFD_PT_main(Panel):
         box = layout.box()
         box.label(text="Surface")
         col = box.column(align=True)
+        col.prop(props, "surface_threshold")
         col.prop(props, "adaptivity")
         col.prop(props, "smooth_iterations")
         col.prop(props, "smooth_strength")
