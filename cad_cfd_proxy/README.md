@@ -73,11 +73,41 @@ All 15 phases implemented.
 | `utils/` | logging, temp-datablock cleanup |
 | `tests/` | headless smoke test |
 
-## Install (dev)
+## Install
 
-Blender ≥ 4.2: **Edit ▸ Preferences ▸ Get Extensions ▸ Install from Disk** and
-point at this folder (or a zip of it). Panel appears in the 3D viewport sidebar
-under **CAD→CFD**.
+This ships with a `blender_manifest.toml`, so Blender 4.2+/5.x treats it as an
+**extension** (not a legacy add-on). It has no external Python dependencies, so
+there are no wheels to bundle. After enabling, the panel appears in the 3D
+Viewport **N-panel ▸ CAD→CFD** tab, with a **Diagnostics** sub-panel showing the
+capability checks.
+
+**Option A — build a zip, then Install from Disk (recommended)**
+
+```sh
+# from the repo root; produces cad_cfd_proxy-<version>.zip
+blender --command extension build --source-dir cad_cfd_proxy
+```
+
+Then in Blender: **Edit ▸ Preferences ▸ Get Extensions ▸ ▾ (top-right) ▸
+Install from Disk…**, pick the zip, and enable it.
+
+**Option B — drag-and-drop**
+
+Zip the folder so `blender_manifest.toml` sits at the **root** of the archive
+(zip the *contents* of `cad_cfd_proxy/`, not the parent folder), then drag the
+`.zip` onto the Blender window and confirm.
+
+**Option C — dev symlink (no rebuild while iterating)**
+
+Link or copy the `cad_cfd_proxy` folder into your user extensions directory,
+e.g. `~/.config/blender/<version>/extensions/user_default/cad_cfd_proxy` (paths
+differ per OS), then refresh local extensions in Preferences.
+
+> **Blender 5.2 note:** the manifest's `blender_version_min = "4.2.0"` permits
+> 5.x, but that floor is conservative and has only been CI-tested on 4.2 LTS.
+> If a 5.x release renamed a Mesh-to-Volume / Volume-to-Mesh node or modifier
+> property, the **Diagnostics** panel will flag it and `Generate` refuses to run
+> with a clear message rather than crashing — that's the place to reconcile.
 
 ## Test
 
