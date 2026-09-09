@@ -32,8 +32,12 @@ for the full development plan.
   metre-scaled. Patch identity is lost through voxelization, so output is a
   single named solid/region. FDS watertight/manifold enforcement is a warning
   until Phase 12.
-- **Phases 5–7, 9, 12–15** — pending. Dilate/close no-op at zero distance;
-  smoothing/validate are graceful no-ops so a default run completes.
+- **Phase 12 — validation.** Done (`core/validate.py`). bmesh watertight/
+  manifold/normal-consistency/degenerate checks + BVH-tree self-intersection
+  detection. `generate` reports the summary; **FDS export now hard-blocks** on
+  non-solver-ready geometry (snappyHexMesh stays tolerant).
+- **Phases 5–7, 9, 13–15** — pending. Dilate/close no-op at zero distance;
+  smoothing is a graceful no-op so a default run completes.
   Internal-mode (Phase 7) still raises until implemented.
 
 ## Layout

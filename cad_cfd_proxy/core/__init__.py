@@ -51,7 +51,10 @@ def generate_proxy(context, props, report=None):
     surface.decimate_to_target(context, proxy, props.resolve_target_faces())
 
     _say("Validating")
-    validate.check(proxy, props)
+    rep = validate.check(proxy, props)
+    if report:
+        level = "INFO" if rep.ok else "WARNING"
+        report({level}, "Validation: %s" % rep.summary())
 
     return proxy
 

@@ -70,18 +70,16 @@ def _solid_name(proxy, props):
 
 
 def _check_fds_ready(proxy, props, report):
-    """FDS &GEOM requires watertight+manifold+oriented geometry.
-
-    Phase 12 will hard-enforce this. Until then the validation report is
-    all-unknown, so we warn rather than block.
+    """FDS &GEOM requires watertight+manifold+oriented geometry with no
+    self-intersections. Fail loudly rather than write geometry FDS will reject.
     """
     rep = validate.check(proxy, props)
     if rep.fds_ready():
         return
-    if report:
-        report({"WARNING"},
-               "FDS export: geometry not verified watertight/manifold "
-               "(validation lands in Phase 12) — check in FDS before use")
+    raise PipelineError(
+        "FDS &GEOM export blocked — geometry is not solver-ready: %s. "
+        "Fix the proxy (or export to snappyHexMesh STL, which is tolerant)."
+        % rep.summary())
 
 
 # --- writers ---------------------------------------------------------------
