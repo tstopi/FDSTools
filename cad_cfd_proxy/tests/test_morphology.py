@@ -26,6 +26,7 @@ def _component_count(mesh):
     bm = bmesh.new()
     bm.from_mesh(mesh)
     bm.verts.ensure_lookup_table()
+    bm.verts.index_update()
     seen = set()
     components = 0
     for seed in bm.verts:

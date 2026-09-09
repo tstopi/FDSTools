@@ -126,15 +126,20 @@ def _offset_along_normals(obj, distance):
     obj.data.update()
 
 def _join_sources(sources, work_coll):
-    """Merge the working mesh objects into one mesh object.
+    """Merge the working mesh objects into one world-space mesh object.
 
-    Phase 2 already baked world transforms into the mesh data, so joining the
-    datablocks directly is correct.
+    Each object's world matrix is applied, so this is correct whether or not
+    transforms were already baked (Phase 2 bakes them to identity, making this
+    a no-op there; raw placed objects are positioned correctly).
     """
     bm = bmesh.new()
     for obj in sources:
-        if obj.type == "MESH":
-            bm.from_mesh(obj.data)
+        if obj.type != "MESH":
+            continue
+        tmp = obj.data.copy()
+        tmp.transform(obj.matrix_world)
+        bm.from_mesh(tmp)
+        bpy.data.meshes.remove(tmp)
     mesh = bpy.data.meshes.new(JOINED_NAME)
     bm.to_mesh(mesh)
     bm.free()
