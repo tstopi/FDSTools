@@ -48,7 +48,7 @@ def generate_proxy(context, props, report=None):
     _say("Reconstructing surface")
     proxy = surface.volume_to_mesh(context, grid, props)
     surface.smooth(proxy, props)
-    surface.decimate_to_target(proxy, props.resolve_target_faces())
+    surface.decimate_to_target(context, proxy, props.resolve_target_faces())
 
     _say("Validating")
     validate.check(proxy, props)

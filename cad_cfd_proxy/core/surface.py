@@ -43,14 +43,50 @@ def smooth(obj, props):
     return obj
 
 
-def decimate_to_target(obj, target_faces, tolerance=0.05):
-    """Decimate to within *tolerance* of *target_faces* by bisecting the
-    collapse ratio (monotonic → converges in a few passes). TODO(phase-10)."""
-    # Pending: no-op so the pipeline runs end-to-end.
+def decimate_to_target(context, obj, target_faces, tolerance=0.05, max_iter=12):
+    """Decimate *obj* to within *tolerance* of *target_faces* (triangles).
+
+    Collapse decimation triangulates and its output count is ~monotonic in the
+    ratio, so we seed the ratio with the linear estimate then bisect. Does
+    nothing if the target is at or above the current triangle count (we can't
+    add detail). Bakes the modifier when done.
+    """
+    current = _tri_count(obj)
+    if target_faces <= 0 or current <= target_faces * (1.0 + tolerance):
+        return obj
+
+    mod = obj.modifiers.new("decimate", "DECIMATE")
+    mod.decimate_type = "COLLAPSE"
+
+    lo, hi = 0.0, 1.0
+    ratio = min(1.0, float(target_faces) / current)  # linear seed
+    for _ in range(max_iter):
+        mod.ratio = ratio
+        faces = _evaluated_face_count(context, obj)
+        if abs(faces - target_faces) <= tolerance * target_faces:
+            break
+        if faces > target_faces:
+            hi = ratio
+        else:
+            lo = ratio
+        ratio = 0.5 * (lo + hi)
+
+    _bake_modifiers(context, obj)
     return obj
 
 
 # --- helpers ---------------------------------------------------------------
+
+def _tri_count(obj):
+    """Triangle count of a mesh with mixed polygon sizes (fan triangulation)."""
+    return sum(len(p.vertices) - 2 for p in obj.data.polygons)
+
+
+def _evaluated_face_count(context, obj):
+    """Polygon count of *obj* after its modifier stack is evaluated."""
+    depsgraph = context.evaluated_depsgraph_get()
+    return len(obj.evaluated_get(depsgraph).data.polygons)
+
 
 def _bake_modifiers(context, obj):
     """Apply *obj*'s modifier stack by evaluating the depsgraph, leaving *obj*

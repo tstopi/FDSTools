@@ -25,8 +25,15 @@ for the full development plan.
 - **Phase 8 — Volume→Mesh.** Done (`core/surface.py`). Volume-to-Mesh modifier
   on the SDF grid, baked to a real watertight/manifold mesh. **The EXTERNAL
   pipeline now runs end-to-end** (collect → cleanup → volume → surface).
-- **Phases 5–7, 9–15** — pending. Dilate/close no-op at zero distance;
-  smoothing/decimation/validate are graceful no-ops so a default run completes.
+- **Phase 10 — adaptive decimation.** Done (`core/surface.py`). Collapse-decimate
+  with ratio bisection to hit a target triangle count within ±5%.
+- **Phase 11 — export.** Done (`core/export.py`). snappyHexMesh **ASCII STL**
+  (named solid) and **FDS `&GEOM`** (VERTS/FACES namelist), both triangulated and
+  metre-scaled. Patch identity is lost through voxelization, so output is a
+  single named solid/region. FDS watertight/manifold enforcement is a warning
+  until Phase 12.
+- **Phases 5–7, 9, 12–15** — pending. Dilate/close no-op at zero distance;
+  smoothing/validate are graceful no-ops so a default run completes.
   Internal-mode (Phase 7) still raises until implemented.
 
 ## Layout
