@@ -127,6 +127,13 @@ class CADCFDProxyProperties(PropertyGroup):
         name="Keep intermediates", default=False,
         description="Leave temporary volume/mesh datablocks in the scene for debugging")
 
+    # --- runtime progress / cancel (driven by the modal Generate operator) ---
+    is_running: BoolProperty(name="Running", default=False)
+    cancel_requested: BoolProperty(name="Cancel requested", default=False)
+    progress: FloatProperty(
+        name="Progress", default=0.0, min=0.0, max=1.0, subtype="FACTOR")
+    progress_label: StringProperty(name="Progress label", default="")
+
     def resolve_target_faces(self):
         """Effective target face count from the preset / custom fields."""
         if self.target_faces_preset == "CUSTOM":

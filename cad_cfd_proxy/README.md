@@ -55,7 +55,9 @@ for the full development plan.
   large-job warnings; surfaced by the Preview operator.
 - **Phase 15 — performance/cleanup.** Done. Temporary volume/mesh datablocks are
   freed after a run and the proxy is re-homed in the scene (`keep_intermediates`
-  overrides).
+  overrides). **Generate runs as a modal operator** with a progress bar and a
+  Cancel button (ESC also cancels); cancellation takes effect at the next phase
+  boundary, and partial intermediates are discarded.
 
 All 15 phases implemented.
 
