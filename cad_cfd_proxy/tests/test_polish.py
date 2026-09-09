@@ -103,6 +103,7 @@ def main():
     _test_estimate()
     _test_finalize()
 
+    cad_cfd_proxy.unregister()
     print("polish test: PASS")
 
 

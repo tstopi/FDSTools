@@ -67,10 +67,17 @@ class CADCFD_PT_main(Panel):
         col.prop(props, "patch_naming")
         col.prop(props, "export_path")
 
-        row = layout.row(align=True)
-        row.operator("cadcfd.preview", icon="ZOOM_ALL")
-        row.operator("cadcfd.generate", icon="MOD_REMESH")
-        layout.operator("cadcfd.export", icon="EXPORT")
+        if props.is_running:
+            # Progress bar + cancel while a generation runs.
+            col = layout.column(align=True)
+            col.progress(factor=props.progress,
+                         text=props.progress_label or "Working…")
+            col.operator("cadcfd.cancel", icon="CANCEL", text="Cancel")
+        else:
+            row = layout.row(align=True)
+            row.operator("cadcfd.preview", icon="ZOOM_ALL")
+            row.operator("cadcfd.generate", icon="MOD_REMESH")
+            layout.operator("cadcfd.export", icon="EXPORT")
 
 
 class CADCFD_PT_diagnostics(Panel):
