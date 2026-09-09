@@ -80,14 +80,16 @@ def _test_close():
     import bmesh
     from cad_cfd_proxy.core import volume, surface
 
-    # Two unit cubes with a 0.6 gap (right face of A at x=0.5, left of B at 1.1)
-    # — wide enough that plain voxelization keeps them separate.
+    # Two unit cubes with a 0.25 gap (right face of A at 0.5, left of B at 0.75).
+    # Gap is a few voxels (separate before close); radius 0.2 bridges it
+    # (2·radius > gap) without over-eroding the cubes (radius << 0.5 half-width,
+    # which would fragment them).
     def add_cube(cx):
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=(cx, 0, 0))
         return bpy.context.active_object
 
     a = add_cube(0.0)
-    b = add_cube(1.6)
+    b = add_cube(1.25)
     props = bpy.context.scene.cad_cfd_proxy
     props.voxel_size = 0.05
     props.fill_volume = True
@@ -97,7 +99,7 @@ def _test_close():
     n_before = _component_count(before.data)
 
     grid = volume.mesh_to_sdf(bpy.context, [a, b], props)
-    grid = volume.morphological_close(bpy.context, grid, 0.5, props)  # 2r=1.0 > 0.6 gap
+    grid = volume.morphological_close(bpy.context, grid, 0.2, props)  # 2r=0.4 > 0.25 gap
     after = surface.volume_to_mesh(bpy.context, grid, props)
     n_after = _component_count(after.data)
 
