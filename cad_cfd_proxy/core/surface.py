@@ -38,8 +38,24 @@ def volume_to_mesh(context, grid, props):
 
 
 def smooth(obj, props):
-    """Smooth position + optional Laplacian smooth, in place. TODO(phase-9)."""
-    # Pending: no-op so the pipeline runs end-to-end.
+    """Laplacian-style vertex smoothing, in place (Phase 9).
+
+    Gentle by default. Smoothing can introduce self-intersections, which Phase
+    12 validation reports. No-op at zero iterations.
+    """
+    import bmesh
+    iterations = props.smooth_iterations
+    if iterations <= 0:
+        return obj
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    for _ in range(iterations):
+        bmesh.ops.smooth_vert(
+            bm, verts=bm.verts, factor=props.smooth_strength,
+            use_axis_x=True, use_axis_y=True, use_axis_z=True)
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
     return obj
 
 

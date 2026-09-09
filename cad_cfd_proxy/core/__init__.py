@@ -7,7 +7,8 @@ The individual phases live in sibling modules (:mod:`.collect`, :mod:`.cleanup`,
 Phase 1 scaffold and raises :class:`NotImplementedError` until its phase lands.
 """
 
-from . import collect, cleanup, volume, domain, surface, validate, export
+from .. import compat
+from . import collect, cleanup, volume, domain, surface, validate, export, estimate
 from .errors import PipelineError  # noqa: F401 (re-exported)
 
 
@@ -29,6 +30,11 @@ def generate_proxy(context, props, report=None):
     def _say(msg):
         if report:
             report({"INFO"}, msg)
+
+    missing = compat.missing_capabilities()
+    if missing:
+        raise PipelineError(
+            "Unsupported Blender build; missing: %s" % ", ".join(missing))
 
     _say("Collecting source geometry")
     sources = collect.gather(context, props)
@@ -57,7 +63,53 @@ def generate_proxy(context, props, report=None):
         level = "INFO" if rep.ok else "WARNING"
         report({level}, "Validation: %s" % rep.summary())
 
+    _say("Cleaning up")
+    finalize_proxy(context, proxy, props)
     return proxy
+
+
+def finalize_proxy(context, proxy, props):
+    """Phase 15 — move *proxy* to the scene and free intermediates.
+
+    The pipeline stages leave temporary objects (joined mesh, volumes, obstacle,
+    domain) in the ``CADCFD_work`` collection. Unless ``keep_intermediates`` is
+    set, remove them and their datablocks to recover memory, and re-home the
+    proxy in the scene's master collection.
+    """
+    import bpy
+
+    work = bpy.data.collections.get(collect.WORK_COLLECTION)
+    if work is None:
+        return
+
+    # Re-home the proxy in the scene master collection.
+    if proxy.name in work.objects:
+        work.objects.unlink(proxy)
+    if proxy.name not in context.scene.collection.objects:
+        context.scene.collection.objects.link(proxy)
+
+    if props.keep_intermediates:
+        return
+
+    for obj in list(work.objects):
+        data = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        _remove_orphan_data(data)
+
+    if not work.objects and not work.children:
+        bpy.data.collections.remove(work)
+
+
+def _remove_orphan_data(data):
+    """Remove a mesh/volume datablock if nothing references it any more."""
+    import bpy
+
+    if data is None or data.users:
+        return
+    if isinstance(data, bpy.types.Mesh):
+        bpy.data.meshes.remove(data)
+    elif isinstance(data, bpy.types.Volume):
+        bpy.data.volumes.remove(data)
 
 
 def export_proxy(context, proxy, props, report=None):
