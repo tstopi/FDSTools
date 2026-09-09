@@ -40,10 +40,10 @@ def generate_proxy(context, props, report=None):
     grid = volume.mesh_to_sdf(context, sources, props)
 
     if props.mode == "EXTERNAL":
-        volume.dilate(grid, props.clearance)
-        volume.morphological_close(grid, props.feature_size)
+        grid = volume.dilate(context, grid, props.clearance, props)
+        grid = volume.morphological_close(context, grid, props.feature_size, props)
     else:  # INTERNAL
-        grid = domain.extract_fluid_volume(context, source, grid, props)
+        grid = domain.extract_fluid_volume(context, sources, grid, props)
 
     _say("Reconstructing surface")
     proxy = surface.volume_to_mesh(context, grid, props)

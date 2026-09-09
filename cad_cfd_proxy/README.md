@@ -36,9 +36,13 @@ for the full development plan.
   manifold/normal-consistency/degenerate checks + BVH-tree self-intersection
   detection. `generate` reports the summary; **FDS export now hard-blocks** on
   non-solver-ready geometry (snappyHexMesh stays tolerant).
-- **Phases 5–7, 9, 13–15** — pending. Dilate/close no-op at zero distance;
-  smoothing is a graceful no-op so a default run completes.
-  Internal-mode (Phase 7) still raises until implemented.
+- **Phases 5–6 — clearance + morphological close.** Done (`core/volume.py`),
+  API-only route: each op is a volume→mesh → offset-along-normals → mesh→volume
+  round-trip (re-voxelization discards the self-intersections a raw offset
+  creates). Clearance dilates; close = dilate then erode, bridging gaps and
+  filling holes smaller than ~2·radius. Both no-op at zero distance.
+- **Phases 7, 9, 13–15** — pending. Smoothing is a graceful no-op so a default
+  run completes. Internal-mode (Phase 7) still raises until implemented.
 
 ## Layout
 

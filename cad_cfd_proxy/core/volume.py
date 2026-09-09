@@ -10,10 +10,13 @@ interior — filling is what lets Volume→Mesh yield a solid envelope rather th
 a double-walled shell, at the cost of needing reasonably closed input (Phase 6
 morphological close makes that robust on open CAD shells).
 
-Phases 5 (dilate/clearance) and 6 (morphological close) operate on the same
-grid and are stubbed until those phases land. True SDF offset/morphology needs
-grid-level access (OpenVDB); the stubs no-op when their distance is zero so a
-default run passes straight through.
+Phases 5 (clearance) and 6 (morphological close) use the API-only route:
+Blender's public API exposes a density grid, not an SDF Python can offset, so
+each morphological step is a **volume→mesh → offset-along-normals → mesh→volume**
+round-trip. Blender's re-voxelization cleans up the self-intersections a raw
+normal offset creates at concave corners, so this approximates true SDF
+dilation/erosion. Close = dilate then erode. Each op no-ops at zero distance so
+a default run passes straight through.
 """
 
 import bmesh
@@ -48,7 +51,32 @@ def mesh_to_sdf(context, sources, props):
     """Voxelize *sources* into an SDF volume. Returns a :class:`VolumeResult`."""
     work_coll = collect._ensure_work_collection(context)
     mesh_obj = _join_sources(sources, work_coll)
+    return _voxelize_object(context, mesh_obj, props)
 
+
+def dilate(context, grid, distance, props):
+    """Offset the surface outward by *distance* (clearance) via a round-trip."""
+    if not distance:
+        return grid
+    return _offset_and_revoxelize(context, grid, distance, props)
+
+
+def morphological_close(context, grid, radius, props):
+    """Dilate then erode by *radius*: fill holes/gaps and bridge parts smaller
+    than ~2·radius, and suppress thin features. Replaces the plan's separate
+    internal-suppression + hole-fill phases."""
+    if not radius:
+        return grid
+    grid = _offset_and_revoxelize(context, grid, radius, props)    # dilate
+    grid = _offset_and_revoxelize(context, grid, -radius, props)   # erode
+    return grid
+
+
+# --- helpers ---------------------------------------------------------------
+
+def _voxelize_object(context, mesh_obj, props):
+    """Build a Volume object + Mesh-to-Volume modifier from *mesh_obj*."""
+    work_coll = collect._ensure_work_collection(context)
     volume = bpy.data.volumes.new(VOLUME_NAME)
     vol_obj = bpy.data.objects.new(VOLUME_NAME, volume)
     work_coll.objects.link(vol_obj)
@@ -67,24 +95,30 @@ def mesh_to_sdf(context, sources, props):
     return VolumeResult(vol_obj, mesh_obj, props.voxel_size)
 
 
-def dilate(grid, distance):
-    """Offset the isosurface outward by *distance* (clearance). TODO(phase-5)."""
-    if not distance:
-        return grid
-    raise NotImplementedError("volume.dilate is a Phase 5 stub")
+def _offset_and_revoxelize(context, grid, distance, props):
+    """One morphological step: mesh the grid, offset every vertex along its
+    normal by *distance* (negative = inward), then re-voxelize the result.
 
-
-def morphological_close(grid, radius):
-    """Dilate then erode by *radius*: fill small holes, drop thin internals.
-
-    Replaces the plan's separate suppression + hole-fill phases. TODO(phase-6).
+    Re-voxelization is what makes this robust — the raw normal offset self-
+    intersects at concave corners, and rebuilding the SDF discards those.
     """
-    if not radius:
-        return grid
-    raise NotImplementedError("volume.morphological_close is a Phase 6 stub")
+    # Local import avoids a circular import (surface imports volume).
+    from . import surface
+    mesh_obj = surface.volume_to_mesh(context, grid, props)
+    _offset_along_normals(mesh_obj, distance)
+    return _voxelize_object(context, mesh_obj, props)
 
 
-# --- helpers ---------------------------------------------------------------
+def _offset_along_normals(obj, distance):
+    """Move every vertex of *obj* along its normal by *distance*, in place."""
+    bm = bmesh.new()
+    bm.from_mesh(obj.data)
+    bm.normal_update()
+    for v in bm.verts:
+        v.co += v.normal * distance
+    bm.to_mesh(obj.data)
+    bm.free()
+    obj.data.update()
 
 def _join_sources(sources, work_coll):
     """Merge the working mesh objects into one mesh object.
