@@ -110,9 +110,14 @@ def _offset_and_revoxelize(context, grid, distance, props):
 
 
 def _offset_along_normals(obj, distance):
-    """Move every vertex of *obj* along its normal by *distance*, in place."""
+    """Move every vertex of *obj* along its outward normal by *distance*.
+
+    Normals are recalculated outward first so +distance always dilates and
+    -distance always erodes, regardless of the winding volume_to_mesh produced.
+    """
     bm = bmesh.new()
     bm.from_mesh(obj.data)
+    bmesh.ops.recalc_face_normals(bm, faces=bm.faces)
     bm.normal_update()
     for v in bm.verts:
         v.co += v.normal * distance

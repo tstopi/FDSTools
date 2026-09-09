@@ -55,12 +55,16 @@ def _test_clearance():
     props.voxel_size = 0.1
     props.fill_volume = True
 
+    # Fair comparison: both baseline and dilated go through exactly one
+    # offset+revoxelize round-trip, so per-pass erosion cancels and we measure
+    # the offset itself. Baseline is a zero-distance round-trip.
     grid = volume.mesh_to_sdf(bpy.context, [cube], props)
-    base = surface.volume_to_mesh(bpy.context, grid, props)
+    base_grid = volume._offset_and_revoxelize(bpy.context, grid, 0.0, props)
+    base = surface.volume_to_mesh(bpy.context, base_grid, props)
     base_dim = _bbox_dim(base)
 
     grid2 = volume.mesh_to_sdf(bpy.context, [cube], props)
-    grid2 = volume.dilate(bpy.context, grid2, 0.3, props)
+    grid2 = volume.dilate(bpy.context, grid2, 0.3, props)   # one round-trip, +0.3
     grown = surface.volume_to_mesh(bpy.context, grid2, props)
     grown_dim = _bbox_dim(grown)
 
@@ -75,13 +79,13 @@ def _test_close():
     import bmesh
     from cad_cfd_proxy.core import volume, surface
 
-    # Two unit cubes with a 0.3 gap (right face of A at x=0.5, left of B at 0.8).
+    # Two unit cubes with a 0.2 gap (right face of A at x=0.5, left of B at 0.7).
     def add_cube(cx):
         bpy.ops.mesh.primitive_cube_add(size=1.0, location=(cx, 0, 0))
         return bpy.context.active_object
 
     a = add_cube(0.0)
-    b = add_cube(1.3)
+    b = add_cube(1.2)
     props = bpy.context.scene.cad_cfd_proxy
     props.voxel_size = 0.05
     props.fill_volume = True
@@ -91,7 +95,7 @@ def _test_close():
     n_before = _component_count(before.data)
 
     grid = volume.mesh_to_sdf(bpy.context, [a, b], props)
-    grid = volume.morphological_close(bpy.context, grid, 0.2, props)  # 2r=0.4 > 0.3
+    grid = volume.morphological_close(bpy.context, grid, 0.2, props)  # 2r=0.4 > 0.2 gap
     after = surface.volume_to_mesh(bpy.context, grid, props)
     n_after = _component_count(after.data)
 
