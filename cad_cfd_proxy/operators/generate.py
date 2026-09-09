@@ -15,7 +15,11 @@ class CADCFD_OT_generate(Operator):
 
     @classmethod
     def poll(cls, context):
-        return compat.all_capabilities_ok()
+        missing = compat.missing_capabilities()
+        if missing:
+            cls.poll_message_set("Unsupported Blender build: " + ", ".join(missing))
+            return False
+        return True
 
     def execute(self, context):
         props = context.scene.cad_cfd_proxy

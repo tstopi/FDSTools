@@ -41,8 +41,23 @@ for the full development plan.
   round-trip (re-voxelization discards the self-intersections a raw offset
   creates). Clearance dilates; close = dilate then erode, bridging gaps and
   filling holes smaller than ~2·radius. Both no-op at zero distance.
-- **Phases 7, 9, 13–15** — pending. Smoothing is a graceful no-op so a default
-  run completes. Internal-mode (Phase 7) still raises until implemented.
+- **Phase 7 — internal fluid volume.** Done (`core/domain.py`). Boolean
+  DIFFERENCE of a padded bounding box (or a user domain object) minus the
+  simplified solid → the flow domain around the object (wind-tunnel style, as
+  snappyHexMesh meshes it). Enclosed hollow-part interiors (duct internals) are
+  out of scope for v1.
+- **Phase 9 — smoothing.** Done (`core/surface.py`). Laplacian vertex smoothing
+  (iterations/strength); no-op at zero.
+- **Phase 13 — compat hardening.** Done. `generate` refuses to run and operators
+  disable with a poll message on an unsupported build (missing nodes/modifiers).
+- **Phase 14 — preview/estimates.** Done (`core/estimate.py`). Voxel/memory/face
+  estimates using the **sparse narrow-band** model (not bbox-volume), with
+  large-job warnings; surfaced by the Preview operator.
+- **Phase 15 — performance/cleanup.** Done. Temporary volume/mesh datablocks are
+  freed after a run and the proxy is re-homed in the scene (`keep_intermediates`
+  overrides).
+
+All 15 phases implemented.
 
 ## Layout
 

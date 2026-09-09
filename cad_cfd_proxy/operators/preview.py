@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
-"""Preview operator — estimates before generation (plan Phase 14)."""
+"""Preview operator — pre-generation estimates (Phase 14)."""
 
 from bpy.types import Operator
 
-from .. import compat
+from .. import compat, core
 
 
 class CADCFD_OT_preview(Operator):
@@ -15,10 +15,23 @@ class CADCFD_OT_preview(Operator):
 
     @classmethod
     def poll(cls, context):
-        return compat.all_capabilities_ok()
+        missing = compat.missing_capabilities()
+        if missing:
+            cls.poll_message_set("Unsupported Blender build: " + ", ".join(missing))
+            return False
+        return True
 
     def execute(self, context):
-        # TODO(phase-14): estimate from surface_area * band / voxel**3
-        # (sparse), NOT bbox_volume / voxel**3 which grossly overstates memory.
-        self.report({"WARNING"}, "Preview estimates are a Phase 14 stub")
-        return {"CANCELLED"}
+        props = context.scene.cad_cfd_proxy
+        est = core.estimate.estimate(context, props)
+        lines = core.estimate.format_lines(est)
+        for line in lines:
+            print("[cad_cfd_proxy] %s" % line)
+        # Surface the headline (+ first warning) in the status bar.
+        headline = "~%.2g faces, ~%.0f MB" % (est["est_faces"], est["est_memory_mb"])
+        if est["warnings"]:
+            self.report({"WARNING"}, "Preview: %s — %s"
+                        % (headline, est["warnings"][0]))
+        else:
+            self.report({"INFO"}, "Preview: " + headline)
+        return {"FINISHED"}

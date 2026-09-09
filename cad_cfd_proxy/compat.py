@@ -85,6 +85,11 @@ def all_capabilities_ok():
     return all(ok for _, ok, _ in check_capabilities())
 
 
+def missing_capabilities():
+    """Return the labels of capability probes that are failing (empty = all ok)."""
+    return [label for label, ok, _ in check_capabilities() if not ok]
+
+
 def find_socket(node, name, in_out="INPUT"):
     """Look a node socket up by *name*, not index.
 
