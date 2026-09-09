@@ -19,12 +19,12 @@ if _REPO_ROOT not in sys.path:
 
 from cad_cfd_proxy.tests import (
     test_smoke, test_collect, test_cleanup, test_volume, test_generate,
-    test_decimate, test_export, test_validate, test_morphology,
+    test_decimate, test_export, test_validate, test_morphology, test_domain,
 )
 
 for module in (test_smoke, test_collect, test_cleanup, test_volume,
                test_generate, test_decimate, test_export, test_validate,
-               test_morphology):
+               test_morphology, test_domain):
     print("=== %s ===" % module.__name__)
     module.main()
 

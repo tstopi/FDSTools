@@ -41,8 +41,13 @@ for the full development plan.
   round-trip (re-voxelization discards the self-intersections a raw offset
   creates). Clearance dilates; close = dilate then erode, bridging gaps and
   filling holes smaller than ~2·radius. Both no-op at zero distance.
-- **Phases 7, 9, 13–15** — pending. Smoothing is a graceful no-op so a default
-  run completes. Internal-mode (Phase 7) still raises until implemented.
+- **Phase 7 — internal fluid volume.** Done (`core/domain.py`). Boolean
+  DIFFERENCE of a padded bounding box (or a user domain object) minus the
+  simplified solid → the flow domain around the object (wind-tunnel style, as
+  snappyHexMesh meshes it). Enclosed hollow-part interiors (duct internals) are
+  out of scope for v1.
+- **Phases 9, 13–15** — pending. Smoothing is a graceful no-op so a default run
+  completes.
 
 ## Layout
 
