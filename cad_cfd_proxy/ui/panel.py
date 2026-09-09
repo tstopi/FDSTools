@@ -31,10 +31,19 @@ class CADCFD_PT_main(Panel):
                 box.prop(props, "domain_padding")
 
         box = layout.box()
+        box.label(text="Cleanup")
+        col = box.column(align=True)
+        col.prop(props, "merge_distance")
+        col.prop(props, "delete_loose")
+        col.prop(props, "fix_normals")
+
+        box = layout.box()
         box.label(text="Volume")
         box.prop(props, "preset")
         col = box.column(align=True)
         col.prop(props, "voxel_size")
+        col.prop(props, "fill_volume")
+        col.prop(props, "interior_band_width")
         if props.mode == "EXTERNAL":
             col.prop(props, "clearance")
         col.prop(props, "feature_size")
@@ -42,6 +51,7 @@ class CADCFD_PT_main(Panel):
         box = layout.box()
         box.label(text="Surface")
         col = box.column(align=True)
+        col.prop(props, "surface_threshold")
         col.prop(props, "adaptivity")
         col.prop(props, "smooth_iterations")
         col.prop(props, "smooth_strength")

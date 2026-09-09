@@ -8,10 +8,7 @@ Phase 1 scaffold and raises :class:`NotImplementedError` until its phase lands.
 """
 
 from . import collect, cleanup, volume, domain, surface, validate, export
-
-
-class PipelineError(RuntimeError):
-    """Raised when a pipeline phase cannot complete."""
+from .errors import PipelineError  # noqa: F401 (re-exported)
 
 
 def generate_proxy(context, props, report=None):
@@ -34,27 +31,30 @@ def generate_proxy(context, props, report=None):
             report({"INFO"}, msg)
 
     _say("Collecting source geometry")
-    source = collect.gather(context, props)
+    sources = collect.gather(context, props)
 
     _say("Cleaning geometry")
-    cleanup.clean(source, props)
+    cleanup.clean(sources, props)
 
     _say("Building volume (SDF)")
-    grid = volume.mesh_to_sdf(source, props)
+    grid = volume.mesh_to_sdf(context, sources, props)
 
     if props.mode == "EXTERNAL":
-        volume.dilate(grid, props.clearance)
-        volume.morphological_close(grid, props.feature_size)
+        grid = volume.dilate(context, grid, props.clearance, props)
+        grid = volume.morphological_close(context, grid, props.feature_size, props)
     else:  # INTERNAL
-        grid = domain.extract_fluid_volume(context, source, grid, props)
+        grid = domain.extract_fluid_volume(context, sources, grid, props)
 
     _say("Reconstructing surface")
-    proxy = surface.volume_to_mesh(grid, props)
+    proxy = surface.volume_to_mesh(context, grid, props)
     surface.smooth(proxy, props)
-    surface.decimate_to_target(proxy, props.resolve_target_faces())
+    surface.decimate_to_target(context, proxy, props.resolve_target_faces())
 
     _say("Validating")
-    validate.check(proxy, props)
+    rep = validate.check(proxy, props)
+    if report:
+        level = "INFO" if rep.ok else "WARNING"
+        report({level}, "Validation: %s" % rep.summary())
 
     return proxy
 

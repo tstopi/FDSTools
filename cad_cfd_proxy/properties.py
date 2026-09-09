@@ -69,10 +69,29 @@ class CADCFDProxyProperties(PropertyGroup):
         name="Domain padding", default=0.1, min=0.0, unit="LENGTH",
         description="Padding around the bounding box when no domain object is set")
 
+    # --- cleanup (phase 3) ---
+    merge_distance: FloatProperty(
+        name="Merge distance", default=1e-4, min=0.0, soft_max=0.01, unit="LENGTH",
+        description="Weld vertices closer than this (0 disables)")
+    delete_loose: BoolProperty(
+        name="Delete loose", default=True,
+        description="Remove vertices/edges not bounding any face")
+    fix_normals: BoolProperty(
+        name="Recalculate normals", default=True,
+        description="Make face normals consistent/outward (needed for correct SDF sign)")
+
     # --- volume / SDF (phases 4, 5, 6) ---
     preset: EnumProperty(name="Preset", items=PRESET_ITEMS, default="CUSTOM")
     voxel_size: FloatProperty(
         name="Voxel size", default=0.02, min=1e-5, soft_max=1.0, unit="LENGTH")
+    fill_volume: BoolProperty(
+        name="Fill volume", default=True,
+        description="Fill the interior so Volume→Mesh yields a solid envelope "
+                    "(needs reasonably closed input; Phase 6 close helps). "
+                    "Disable for a thin band around open surfaces")
+    interior_band_width: FloatProperty(
+        name="Interior band", default=3.0, min=0.5, soft_max=10.0,
+        description="SDF band thickness inside the surface, in voxels")
     clearance: FloatProperty(
         name="Clearance", default=0.0, min=0.0, unit="LENGTH",
         description="Outward SDF offset around the source (external mode)")
@@ -82,6 +101,10 @@ class CADCFDProxyProperties(PropertyGroup):
                     "smaller than this")
 
     # --- surface (phases 8, 9, 10) ---
+    surface_threshold: FloatProperty(
+        name="Iso threshold", default=0.1, min=0.0, max=1.0,
+        description="Grid value at the extracted isosurface (Volume→Mesh). "
+                    "Lower sits closer to the true surface (less inward erosion)")
     adaptivity: FloatProperty(name="Adaptivity", default=0.0, min=0.0, max=1.0)
     smooth_iterations: IntProperty(name="Smooth iterations", default=2, min=0, max=100)
     smooth_strength: FloatProperty(name="Smooth strength", default=0.5, min=0.0, max=1.0)

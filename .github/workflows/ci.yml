@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Byte-compile addon
+        run: python -m compileall -q cad_cfd_proxy
+
+  headless-tests:
+    runs-on: ubuntu-latest
+    needs: compile
+    env:
+      # Blender 4.2 LTS. NOTE: bump when the target build is confirmed
+      # (the addon's minimum is set in blender_manifest.toml / compat.py).
+      BLENDER_SERIES: "4.2"
+      BLENDER_VERSION: "4.2.3"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Blender runtime libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1 libglu1-mesa libegl1 \
+            libxi6 libxrender1 libxxf86vm1 libxfixes3 libxkbcommon0 \
+            libsm6 libxrandr2 libxinerama1 xz-utils
+
+      - name: Cache Blender
+        id: cache-blender
+        uses: actions/cache@v4
+        with:
+          path: ~/blender
+          key: blender-${{ env.BLENDER_VERSION }}-linux-x64
+
+      - name: Download Blender
+        if: steps.cache-blender.outputs.cache-hit != 'true'
+        run: |
+          url="https://download.blender.org/release/Blender${BLENDER_SERIES}/blender-${BLENDER_VERSION}-linux-x64.tar.xz"
+          echo "Downloading $url"
+          curl -fsSL "$url" -o blender.tar.xz
+          mkdir -p "$HOME/blender"
+          tar -xf blender.tar.xz -C "$HOME/blender" --strip-components=1
+
+      - name: Add Blender to PATH
+        run: echo "$HOME/blender" >> "$GITHUB_PATH"
+
+      - name: Blender version
+        run: blender --version
+
+      - name: Run headless tests
+        run: |
+          blender --background --factory-startup --python-exit-code 1 \
+            --python cad_cfd_proxy/tests/run_all.py
