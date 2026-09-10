@@ -94,22 +94,32 @@ def check(obj, props=None):
 def _count_self_intersections(bm):
     """Count intersecting face pairs via BVH overlap, excluding adjacent faces.
 
-    Faces that merely share a vertex/edge legitimately overlap within epsilon,
-    so they're filtered out; what remains are genuine crossings.
+    Runs on a triangulated copy: ``BVHTree.overlap`` reports indices into the
+    tree's tessellated triangles, so mapping them back to ``bm.faces`` is only
+    reliable when the mesh is already all triangles. Triangulating first (a
+    copy, so the proxy's own quads/ngons are untouched) keeps that 1:1. Faces
+    that merely share a vertex/edge overlap within epsilon, so they're filtered
+    out; what remains are genuine crossings.
     """
-    tree = BVHTree.FromBMesh(bm, epsilon=_BVH_EPSILON)
-    seen = set()
-    count = 0
-    for i, j in tree.overlap(tree):
-        if i == j:
-            continue
-        key = (i, j) if i < j else (j, i)
-        if key in seen:
-            continue
-        seen.add(key)
-        vi = {v.index for v in bm.faces[i].verts}
-        vj = {v.index for v in bm.faces[j].verts}
-        if vi & vj:  # shared vertex/edge → adjacency, not a real intersection
-            continue
-        count += 1
-    return count
+    tri = bm.copy()
+    try:
+        bmesh.ops.triangulate(tri, faces=tri.faces)
+        tri.faces.ensure_lookup_table()
+        tree = BVHTree.FromBMesh(tri, epsilon=_BVH_EPSILON)
+        seen = set()
+        count = 0
+        for i, j in tree.overlap(tree):
+            if i == j:
+                continue
+            key = (i, j) if i < j else (j, i)
+            if key in seen:
+                continue
+            seen.add(key)
+            vi = {v.index for v in tri.faces[i].verts}
+            vj = {v.index for v in tri.faces[j].verts}
+            if vi & vj:  # shared vertex/edge → adjacency, not a real intersection
+                continue
+            count += 1
+        return count
+    finally:
+        tri.free()
