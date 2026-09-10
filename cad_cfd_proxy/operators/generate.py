@@ -40,11 +40,9 @@ class CADCFD_OT_generate(Operator):
 
     def invoke(self, context, event):
         props = context.scene.cad_cfd_proxy
-        try:
-            self._gen = core.generate_job(context, props)
-        except (NotImplementedError, core.PipelineError) as exc:
-            self.report({"ERROR"}, str(exc))
-            return {"CANCELLED"}
+        # Creating the generator does not run any phase (lazy); the first phase
+        # runs on the first modal tick, where errors are handled.
+        self._gen = core.generate_job(context, props)
 
         props.is_running = True
         props.cancel_requested = False
@@ -70,7 +68,10 @@ class CADCFD_OT_generate(Operator):
             label, fraction = next(self._gen)
         except StopIteration:
             return self._end(context, cancelled=False)
-        except (NotImplementedError, core.PipelineError) as exc:
+        except Exception as exc:  # noqa: BLE001
+            # Any phase error (expected PipelineError, or an unexpected C-op
+            # failure) must still tear the modal down — otherwise is_running
+            # stays True and the event timer leaks, wedging Generate.
             self.report({"ERROR"}, str(exc))
             return self._end(context, cancelled=True)
 
@@ -107,6 +108,7 @@ class CADCFD_OT_generate(Operator):
         try:
             core.generate_proxy(context, props, report=self.report)
         except (NotImplementedError, core.PipelineError) as exc:
+            core.discard_work(context)  # don't leave partial intermediates behind
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         self.report({"INFO"}, "Proxy generated")

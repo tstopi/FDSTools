@@ -76,10 +76,15 @@ def decimate_to_target(context, obj, target_faces, tolerance=0.05, max_iter=12):
 
     lo, hi = 0.0, 1.0
     ratio = min(1.0, float(target_faces) / current)  # linear seed
+    best_ratio = ratio
+    best_err = None
     for _ in range(max_iter):
         mod.ratio = ratio
         faces = _evaluated_face_count(context, obj)
-        if abs(faces - target_faces) <= tolerance * target_faces:
+        err = abs(faces - target_faces)
+        if best_err is None or err < best_err:
+            best_err, best_ratio = err, ratio
+        if err <= tolerance * target_faces:
             break
         if faces > target_faces:
             hi = ratio
@@ -87,6 +92,9 @@ def decimate_to_target(context, obj, target_faces, tolerance=0.05, max_iter=12):
             lo = ratio
         ratio = 0.5 * (lo + hi)
 
+    # Bake the best ratio seen, not whatever the loop last computed-but-never-
+    # measured (the trailing midpoint would otherwise be discarded unmeasured).
+    mod.ratio = best_ratio
     _bake_modifiers(context, obj)
     return obj
 

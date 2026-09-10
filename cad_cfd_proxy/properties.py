@@ -36,6 +36,23 @@ PRESET_ITEMS = (
     ("FACTORY", "Factory / plant", "Coarse voxel, large features"),
 )
 
+# Preset → (voxel_size, clearance, feature_size) in metres. Selecting a preset
+# writes these; "CUSTOM" leaves the current values untouched.
+PRESET_VALUES = {
+    "MECHANICAL": (0.002, 0.0, 0.005),
+    "PRODUCT": (0.005, 0.0, 0.010),
+    "VEHICLE": (0.020, 0.050, 0.050),
+    "FACTORY": (0.100, 0.200, 0.300),
+}
+
+
+def _apply_preset(self, context):
+    """Update callback: write the preset's parameters onto the property group."""
+    values = PRESET_VALUES.get(self.preset)
+    if values is None:  # CUSTOM
+        return
+    self.voxel_size, self.clearance, self.feature_size = values
+
 TARGET_FACE_ITEMS = (
     ("5000", "5k", ""),
     ("10000", "10k", ""),
@@ -81,7 +98,8 @@ class CADCFDProxyProperties(PropertyGroup):
         description="Make face normals consistent/outward (needed for correct SDF sign)")
 
     # --- volume / SDF (phases 4, 5, 6) ---
-    preset: EnumProperty(name="Preset", items=PRESET_ITEMS, default="CUSTOM")
+    preset: EnumProperty(
+        name="Preset", items=PRESET_ITEMS, default="CUSTOM", update=_apply_preset)
     voxel_size: FloatProperty(
         name="Voxel size", default=0.02, min=1e-5, soft_max=1.0, unit="LENGTH")
     fill_volume: BoolProperty(

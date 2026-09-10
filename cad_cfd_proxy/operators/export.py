@@ -21,6 +21,10 @@ class CADCFD_OT_export(Operator):
         props = context.scene.cad_cfd_proxy
         try:
             core.export_proxy(context, context.active_object, props, report=self.report)
+        except core.PipelineError as exc:
+            # Expected failures: no path, non-solver-ready FDS geometry, empty proxy.
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
         except NotImplementedError as exc:
             self.report({"WARNING"}, "Not yet implemented: %s" % exc)
             return {"CANCELLED"}
