@@ -488,7 +488,7 @@ def main():
           f"across {len({m for m, _ in groups})} members.")
 
     # --- integrate every location ---------------------------------------
-    location_results = pd.DataFrame({"Time": time})
+    location_data: dict[str, np.ndarray] = {"Time": time}
     member_locations: dict[str, list[str]] = {}
 
     for (member, location), devs in sorted(groups.items()):
@@ -501,15 +501,17 @@ def main():
             steel = solve_unprotected_steel(time, ast, cfg.AmV)
 
         key = f"{member}_{location}"
-        location_results[key] = steel
+        location_data[key] = steel
         member_locations.setdefault(member, []).append(key)
 
+    # Build in one shot to avoid DataFrame fragmentation.
+    location_results = pd.DataFrame(location_data)
     location_results.to_csv(LOCATION_OUTPUT, index=False)
     print(f"Saved {LOCATION_OUTPUT}")
 
     # --- hottest location + assessment per member -----------------------
     summary_rows = []
-    peaks = pd.DataFrame({"Time": time})
+    peaks_data: dict[str, np.ndarray] = {"Time": time}
     member_hottest = {}
 
     for member in sorted(member_locations):
@@ -525,7 +527,7 @@ def main():
         util = (tmax / crit) if crit else None
 
         member_hottest[member] = (hottest_key, series, cfg)
-        peaks[member] = series
+        peaks_data[member] = series
 
         summary_rows.append({
             "Member": member,
@@ -539,6 +541,7 @@ def main():
         })
 
     summary_df = pd.DataFrame(summary_rows)
+    peaks = pd.DataFrame(peaks_data)
 
     # --- configuration audit sheet --------------------------------------
     config_rows = []
