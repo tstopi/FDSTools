@@ -28,11 +28,26 @@ does not swallow an unrelated ``APRON``.
 
 Physics reference: EN 1993-1-2:2005, sections 3.4.1.2 (specific heat),
 4.2.5.1 (unprotected members) and 4.2.5.2 (protected members).
+
+Usage
+-----
+Run with the built-in defaults below::
+
+    python steel_temperature.py
+
+or drive everything from an external YAML/JSON config (see
+``steel_config.example.yaml``)::
+
+    python steel_temperature.py --config my_project.yaml
+    python steel_temperature.py --config my_project.yaml --input CHID_devc.csv
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,7 +59,7 @@ import numpy as np
 import pandas as pd
 
 # ============================================================
-# USER SETTINGS
+# USER SETTINGS  (built-in defaults; override with --config)
 # ============================================================
 
 INPUT_CSV = "fds_devc.csv"
@@ -486,10 +501,114 @@ def plot_member(member, time, series, hottest_location, config):
 
 
 # ============================================================
+# EXTERNAL CONFIGURATION (YAML / JSON)
+# ============================================================
+# Everything under USER SETTINGS / MEMBER PROPERTIES above acts as the built-in
+# default. An optional --config file (YAML or JSON) overrides any of it, so the
+# same script can be reused across projects without editing the source. See
+# steel_config.example.yaml for the full schema.
+
+# Maps a config key -> the module-level global it overrides.
+_SCALAR_KEYS = {
+    "input_csv": "INPUT_CSV",
+    "grouping_method": "GROUPING_METHOD",
+    "initial_steel_temp": "INITIAL_STEEL_TEMP",
+    "max_time_step": "MAX_TIME_STEP",
+}
+_FIRE_KEYS = {
+    "alpha_c": "ALPHA_C",
+    "emissivity": "EMISSIVITY",
+    "config_factor": "CONFIG_FACTOR",
+    "shadow_factor": "SHADOW_FACTOR",
+    "sigma": "SIGMA",
+}
+_OUTPUT_KEYS = {
+    "locations_csv": "LOCATION_OUTPUT",
+    "excel": "EXCEL_OUTPUT",
+    "plot_dir": "PLOT_DIR",
+}
+
+
+def load_config(path):
+    """Load a YAML or JSON config file into a dict (auto-detected by suffix)."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    text = path.read_text()
+    if path.suffix.lower() in (".yaml", ".yml"):
+        try:
+            import yaml
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "PyYAML is required for YAML config files (pip install pyyaml), "
+                "or use a .json config instead."
+            ) from exc
+        data = yaml.safe_load(text)
+    elif path.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        raise ValueError(f"Unsupported config extension: {path.suffix!r} "
+                         "(use .yaml, .yml or .json)")
+    if not isinstance(data, dict):
+        raise ValueError("Config file must contain a mapping at the top level.")
+    return data
+
+
+def apply_config(cfg):
+    """Override the module-level settings from a loaded config dict."""
+    g = globals()
+
+    for key, name in _SCALAR_KEYS.items():
+        if key in cfg:
+            g[name] = cfg[key]
+
+    for key, name in _FIRE_KEYS.items():
+        if key in cfg.get("fire", {}):
+            g[name] = cfg["fire"][key]
+
+    if "rho" in cfg.get("steel", {}):
+        g["RHO_STEEL"] = cfg["steel"]["rho"]
+
+    for key, name in _OUTPUT_KEYS.items():
+        if key in cfg.get("output", {}):
+            value = cfg["output"][key]
+            g[name] = Path(value) if name == "PLOT_DIR" else value
+
+    if "default_protection" in cfg:
+        g["DEFAULT_PROTECTION"] = dict(cfg["default_protection"])
+
+    # A `members` block, if present, replaces MEMBER_PROPERTIES wholesale so the
+    # Configuration audit sheet reflects exactly what was supplied.
+    if "members" in cfg:
+        members = dict(cfg["members"])
+        members.setdefault("__default__", MEMBER_PROPERTIES["__default__"])
+        g["MEMBER_PROPERTIES"] = members
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="FDS AST -> steel temperature post-processor (EN 1993-1-2).")
+    parser.add_argument(
+        "-c", "--config", metavar="FILE",
+        help="YAML or JSON configuration file (overrides the built-in defaults).")
+    parser.add_argument(
+        "-i", "--input", metavar="CSV",
+        help="FDS <CHID>_devc.csv file (overrides input_csv from config/defaults).")
+    return parser.parse_args(argv)
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
+    if args.config:
+        print(f"Config:  {args.config}")
+        apply_config(load_config(args.config))
+    if args.input:
+        globals()["INPUT_CSV"] = args.input
+
     print(f"Reading: {INPUT_CSV}")
     df, time_col = read_devc_csv(INPUT_CSV)
     time = df[time_col].to_numpy(dtype=float)
