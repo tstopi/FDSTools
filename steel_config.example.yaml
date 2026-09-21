@@ -1,0 +1,74 @@
+# ============================================================
+# Example configuration for steel_temperature.py
+# ============================================================
+# Run with:  python steel_temperature.py --config steel_config.example.yaml
+#
+# Every key is optional. Anything omitted falls back to the built-in default
+# in the script. A JSON file with the same structure works too
+# (python steel_temperature.py --config config.json).
+
+# --- input / integration ---------------------------------------------------
+input_csv: fds_devc.csv        # FDS <CHID>_devc.csv (also settable with --input)
+# chid: Case_A                 # scenario id prepended to outputs; default: derived
+#                              # from input_csv (<CHID>_devc.csv). Also --chid.
+grouping_method: max           # "max" (conservative) or "mean" over a location's faces
+initial_steel_temp: 20.0       # deg C
+max_time_step: 5.0             # s; coarse FDS intervals are sub-stepped to this
+
+# --- fire / boundary conditions (unprotected members) ----------------------
+fire:
+  alpha_c: 25.0                # convective coefficient, W/m2K (25 standard, 35 hydrocarbon)
+  emissivity: 0.7             # resultant emissivity eps_m * eps_f
+  config_factor: 1.0          # view / configuration factor Phi
+  shadow_factor: 1.0          # shadow-effect correction k_sh
+  # sigma: 5.67e-8            # Stefan-Boltzmann constant (rarely changed)
+
+# --- steel -----------------------------------------------------------------
+steel:
+  rho: 7850.0                 # kg/m3 (specific heat is temperature-dependent, per EN)
+
+# --- output files ----------------------------------------------------------
+# By default the base names below are prefixed with the CHID, e.g.
+# Case_A_steel_fire_results.xlsx, so scenarios never overwrite each other.
+# Uncomment an entry to set an explicit path; that disables the prefix for it.
+# output:
+#   locations_csv: steel_temperature_locations.csv
+#   excel: steel_fire_results.xlsx
+#   plot_dir: member_plots
+
+# --- fallback protection ---------------------------------------------------
+# Used when a member is flagged protected but supplies no "protection" block.
+default_protection:
+  thickness: 0.025            # dp, m
+  conductivity: 0.12          # lambda_p, W/mK
+  rho: 300.0                  # rho_p, kg/m3
+  cp: 1700.0                  # c_p, J/kgK
+
+# --- member properties (longest family-prefix match) -----------------------
+# A single entry covers a whole family: "AP" -> AP, AP-1, AP-2, AP15, ...
+# "__default__" is used for any member matching no prefix.
+members:
+  AP:
+    AmV: 115.0                # section factor Am/V, 1/m
+    critical_temp: 550.0      # deg C (use null to skip the assessment)
+    protected: false
+
+  YP:
+    AmV: 115.0
+    critical_temp: 550.0
+    protected: false
+
+  D_:
+    AmV: 165.0
+    critical_temp: 620.0
+    protected: true
+    protection:
+      thickness: 0.025
+      conductivity: 0.12
+      rho: 300.0
+      cp: 1700.0
+
+  __default__:
+    AmV: 150.0
+    critical_temp: null
+    protected: false

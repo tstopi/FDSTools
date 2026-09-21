@@ -11,27 +11,47 @@ per-member critical temperature, giving the maximum steel temperature, the
 utilisation ratio and the interpolated time at which the critical temperature
 is first exceeded.
 
-Outputs
+Outputs (each prefixed with the scenario CHID, e.g. ``Case_A_...``)
 -------
-* ``steel_temperature_locations.csv`` - steel temperature history, all locations
-* ``steel_fire_results.xlsx``         - workbook (summary / locations / peaks / config)
-* ``member_plots/*.png``              - one temperature plot per member
+* ``<CHID>_steel_temperature_locations.csv`` - steel temperatures, all locations
+* ``<CHID>_steel_fire_results.xlsx``         - workbook (summary/locations/peaks/config)
+* ``<CHID>_member_plots/*.png``              - one temperature plot per member
+
+The CHID is taken from ``--chid`` / the config, or derived from the input
+filename (``<CHID>_devc.csv``), so several scenarios can be post-processed in
+the same directory without overwriting each other.
 
 Device naming convention (``<Member>_<Face>_<Location>``)::
 
     AP_F1_001      YP_F4_012      D_01_F2_007      AP-2_F3_005
 
-Members are matched to a configuration entry by longest-prefix match, so
+Members are matched to a configuration entry by longest family-prefix match:
 ``AP``, ``AP-1`` and ``AP-15`` all inherit the ``AP`` entry, and ``D_01``,
-``D_02`` ... inherit ``D_``.
+``D_02`` ... inherit ``D_``. Matching stops at a letter boundary, so ``AP``
+does not swallow an unrelated ``APRON``.
 
 Physics reference: EN 1993-1-2:2005, sections 3.4.1.2 (specific heat),
 4.2.5.1 (unprotected members) and 4.2.5.2 (protected members).
+
+Usage
+-----
+Run with the built-in defaults below::
+
+    python steel_temperature.py
+
+or drive everything from an external YAML/JSON config (see
+``steel_config.example.yaml``)::
+
+    python steel_temperature.py --config my_project.yaml
+    python steel_temperature.py --config my_project.yaml --input CHID_devc.csv
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,10 +63,15 @@ import numpy as np
 import pandas as pd
 
 # ============================================================
-# USER SETTINGS
+# USER SETTINGS  (built-in defaults; override with --config)
 # ============================================================
 
 INPUT_CSV = "fds_devc.csv"
+
+# FDS job identifier. Left as None it is derived from the input filename
+# (``<CHID>_devc.csv`` -> ``<CHID>``) and prepended to every output name, so
+# several scenarios can be post-processed side by side without overwriting.
+CHID = None
 
 # How the AST devices on the faces of one location are combined into a single
 # thermal boundary condition. "max" is conservative and recommended.
@@ -125,7 +150,8 @@ DEFAULT_PROTECTION = {
 }
 
 # ============================================================
-# OUTPUT FILES
+# OUTPUT FILES  (base names; the CHID is prepended at run time
+# unless an explicit path is given in the config's "output" block)
 # ============================================================
 
 LOCATION_OUTPUT = "steel_temperature_locations.csv"
@@ -178,13 +204,27 @@ class MemberConfig:
     protection: dict | None = field(default=None)
 
 
+def _prefix_matches(member, prefix):
+    """True if *member* belongs to the *prefix* family.
+
+    A prefix matches when the member equals it, or continues with a non-letter
+    boundary. So ``"AP"`` matches ``AP``, ``AP-1``, ``AP_3`` and ``AP15`` but
+    not ``APRON``; ``"D_"`` matches ``D_01``.
+    """
+    if not member.startswith(prefix):
+        return False
+    if len(member) == len(prefix):
+        return True
+    return not member[len(prefix)].isalpha()
+
+
 def get_member_config(member):
     """Return the :class:`MemberConfig` for *member* by longest-prefix match."""
     best_prefix = None
     for prefix in MEMBER_PROPERTIES:
         if prefix == "__default__":
             continue
-        if member.startswith(prefix):
+        if _prefix_matches(member, prefix):
             if best_prefix is None or len(prefix) > len(best_prefix):
                 best_prefix = prefix
 
@@ -471,10 +511,147 @@ def plot_member(member, time, series, hottest_location, config):
 
 
 # ============================================================
+# EXTERNAL CONFIGURATION (YAML / JSON)
+# ============================================================
+# Everything under USER SETTINGS / MEMBER PROPERTIES above acts as the built-in
+# default. An optional --config file (YAML or JSON) overrides any of it, so the
+# same script can be reused across projects without editing the source. See
+# steel_config.example.yaml for the full schema.
+
+# Maps a config key -> the module-level global it overrides.
+_SCALAR_KEYS = {
+    "input_csv": "INPUT_CSV",
+    "chid": "CHID",
+    "grouping_method": "GROUPING_METHOD",
+    "initial_steel_temp": "INITIAL_STEEL_TEMP",
+    "max_time_step": "MAX_TIME_STEP",
+}
+_FIRE_KEYS = {
+    "alpha_c": "ALPHA_C",
+    "emissivity": "EMISSIVITY",
+    "config_factor": "CONFIG_FACTOR",
+    "shadow_factor": "SHADOW_FACTOR",
+    "sigma": "SIGMA",
+}
+_OUTPUT_KEYS = {
+    "locations_csv": "LOCATION_OUTPUT",
+    "excel": "EXCEL_OUTPUT",
+    "plot_dir": "PLOT_DIR",
+}
+
+# Output globals whose path the user set explicitly (config/CLI) and which must
+# therefore NOT receive the automatic CHID prefix.
+_OUTPUT_OVERRIDDEN = set()
+
+
+def derive_chid(input_csv):
+    """Return the CHID from an FDS input filename (``<CHID>_devc.csv``)."""
+    name = Path(input_csv).name
+    if name.lower().endswith("_devc.csv"):
+        return name[: -len("_devc.csv")]
+    return Path(name).stem
+
+
+def prefix_with_chid(path, chid):
+    """Prepend ``<chid>_`` to the file/dir name, keeping any parent directory."""
+    p = Path(path)
+    return p.parent / f"{chid}_{p.name}"
+
+
+def load_config(path):
+    """Load a YAML or JSON config file into a dict (auto-detected by suffix)."""
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+    text = path.read_text()
+    if path.suffix.lower() in (".yaml", ".yml"):
+        try:
+            import yaml
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "PyYAML is required for YAML config files (pip install pyyaml), "
+                "or use a .json config instead."
+            ) from exc
+        data = yaml.safe_load(text)
+    elif path.suffix.lower() == ".json":
+        data = json.loads(text)
+    else:
+        raise ValueError(f"Unsupported config extension: {path.suffix!r} "
+                         "(use .yaml, .yml or .json)")
+    if not isinstance(data, dict):
+        raise ValueError("Config file must contain a mapping at the top level.")
+    return data
+
+
+def apply_config(cfg):
+    """Override the module-level settings from a loaded config dict."""
+    g = globals()
+
+    for key, name in _SCALAR_KEYS.items():
+        if key in cfg:
+            g[name] = cfg[key]
+
+    for key, name in _FIRE_KEYS.items():
+        if key in cfg.get("fire", {}):
+            g[name] = cfg["fire"][key]
+
+    if "rho" in cfg.get("steel", {}):
+        g["RHO_STEEL"] = cfg["steel"]["rho"]
+
+    for key, name in _OUTPUT_KEYS.items():
+        if key in cfg.get("output", {}):
+            value = cfg["output"][key]
+            g[name] = Path(value) if name == "PLOT_DIR" else value
+            _OUTPUT_OVERRIDDEN.add(name)
+
+    if "default_protection" in cfg:
+        g["DEFAULT_PROTECTION"] = dict(cfg["default_protection"])
+
+    # A `members` block, if present, replaces MEMBER_PROPERTIES wholesale so the
+    # Configuration audit sheet reflects exactly what was supplied.
+    if "members" in cfg:
+        members = dict(cfg["members"])
+        members.setdefault("__default__", MEMBER_PROPERTIES["__default__"])
+        g["MEMBER_PROPERTIES"] = members
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="FDS AST -> steel temperature post-processor (EN 1993-1-2).")
+    parser.add_argument(
+        "-c", "--config", metavar="FILE",
+        help="YAML or JSON configuration file (overrides the built-in defaults).")
+    parser.add_argument(
+        "-i", "--input", metavar="CSV",
+        help="FDS <CHID>_devc.csv file (overrides input_csv from config/defaults).")
+    parser.add_argument(
+        "--chid", metavar="CHID",
+        help="Scenario identifier prepended to output names "
+             "(default: derived from the input filename).")
+    return parser.parse_args(argv)
+
+
+# ============================================================
 # MAIN
 # ============================================================
 
-def main():
+def main(argv=None):
+    args = parse_args(argv)
+    if args.config:
+        print(f"Config:  {args.config}")
+        apply_config(load_config(args.config))
+    if args.input:
+        globals()["INPUT_CSV"] = args.input
+    if args.chid:
+        globals()["CHID"] = args.chid
+
+    # Resolve the scenario CHID and prefix any output not set explicitly.
+    chid = CHID or derive_chid(INPUT_CSV)
+    for name in _OUTPUT_KEYS.values():
+        if name not in _OUTPUT_OVERRIDDEN:
+            globals()[name] = prefix_with_chid(globals()[name], chid)
+    print(f"CHID:    {chid}")
+
     print(f"Reading: {INPUT_CSV}")
     df, time_col = read_devc_csv(INPUT_CSV)
     time = df[time_col].to_numpy(dtype=float)
@@ -488,7 +665,7 @@ def main():
           f"across {len({m for m, _ in groups})} members.")
 
     # --- integrate every location ---------------------------------------
-    location_results = pd.DataFrame({"Time": time})
+    location_data: dict[str, np.ndarray] = {"Time": time}
     member_locations: dict[str, list[str]] = {}
 
     for (member, location), devs in sorted(groups.items()):
@@ -501,15 +678,17 @@ def main():
             steel = solve_unprotected_steel(time, ast, cfg.AmV)
 
         key = f"{member}_{location}"
-        location_results[key] = steel
+        location_data[key] = steel
         member_locations.setdefault(member, []).append(key)
 
+    # Build in one shot to avoid DataFrame fragmentation.
+    location_results = pd.DataFrame(location_data)
     location_results.to_csv(LOCATION_OUTPUT, index=False)
     print(f"Saved {LOCATION_OUTPUT}")
 
     # --- hottest location + assessment per member -----------------------
     summary_rows = []
-    peaks = pd.DataFrame({"Time": time})
+    peaks_data: dict[str, np.ndarray] = {"Time": time}
     member_hottest = {}
 
     for member in sorted(member_locations):
@@ -525,7 +704,7 @@ def main():
         util = (tmax / crit) if crit else None
 
         member_hottest[member] = (hottest_key, series, cfg)
-        peaks[member] = series
+        peaks_data[member] = series
 
         summary_rows.append({
             "Member": member,
@@ -539,6 +718,7 @@ def main():
         })
 
     summary_df = pd.DataFrame(summary_rows)
+    peaks = pd.DataFrame(peaks_data)
 
     # --- configuration audit sheet --------------------------------------
     config_rows = []
