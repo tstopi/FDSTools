@@ -21,9 +21,10 @@ Device naming convention (``<Member>_<Face>_<Location>``)::
 
     AP_F1_001      YP_F4_012      D_01_F2_007      AP-2_F3_005
 
-Members are matched to a configuration entry by longest-prefix match, so
+Members are matched to a configuration entry by longest family-prefix match:
 ``AP``, ``AP-1`` and ``AP-15`` all inherit the ``AP`` entry, and ``D_01``,
-``D_02`` ... inherit ``D_``.
+``D_02`` ... inherit ``D_``. Matching stops at a letter boundary, so ``AP``
+does not swallow an unrelated ``APRON``.
 
 Physics reference: EN 1993-1-2:2005, sections 3.4.1.2 (specific heat),
 4.2.5.1 (unprotected members) and 4.2.5.2 (protected members).
@@ -178,13 +179,27 @@ class MemberConfig:
     protection: dict | None = field(default=None)
 
 
+def _prefix_matches(member, prefix):
+    """True if *member* belongs to the *prefix* family.
+
+    A prefix matches when the member equals it, or continues with a non-letter
+    boundary. So ``"AP"`` matches ``AP``, ``AP-1``, ``AP_3`` and ``AP15`` but
+    not ``APRON``; ``"D_"`` matches ``D_01``.
+    """
+    if not member.startswith(prefix):
+        return False
+    if len(member) == len(prefix):
+        return True
+    return not member[len(prefix)].isalpha()
+
+
 def get_member_config(member):
     """Return the :class:`MemberConfig` for *member* by longest-prefix match."""
     best_prefix = None
     for prefix in MEMBER_PROPERTIES:
         if prefix == "__default__":
             continue
-        if member.startswith(prefix):
+        if _prefix_matches(member, prefix):
             if best_prefix is None or len(prefix) > len(best_prefix):
                 best_prefix = prefix
 
