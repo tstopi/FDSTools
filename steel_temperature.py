@@ -11,11 +11,15 @@ per-member critical temperature, giving the maximum steel temperature, the
 utilisation ratio and the interpolated time at which the critical temperature
 is first exceeded.
 
-Outputs
+Outputs (each prefixed with the scenario CHID, e.g. ``Case_A_...``)
 -------
-* ``steel_temperature_locations.csv`` - steel temperature history, all locations
-* ``steel_fire_results.xlsx``         - workbook (summary / locations / peaks / config)
-* ``member_plots/*.png``              - one temperature plot per member
+* ``<CHID>_steel_temperature_locations.csv`` - steel temperatures, all locations
+* ``<CHID>_steel_fire_results.xlsx``         - workbook (summary/locations/peaks/config)
+* ``<CHID>_member_plots/*.png``              - one temperature plot per member
+
+The CHID is taken from ``--chid`` / the config, or derived from the input
+filename (``<CHID>_devc.csv``), so several scenarios can be post-processed in
+the same directory without overwriting each other.
 
 Device naming convention (``<Member>_<Face>_<Location>``)::
 
@@ -63,6 +67,11 @@ import pandas as pd
 # ============================================================
 
 INPUT_CSV = "fds_devc.csv"
+
+# FDS job identifier. Left as None it is derived from the input filename
+# (``<CHID>_devc.csv`` -> ``<CHID>``) and prepended to every output name, so
+# several scenarios can be post-processed side by side without overwriting.
+CHID = None
 
 # How the AST devices on the faces of one location are combined into a single
 # thermal boundary condition. "max" is conservative and recommended.
@@ -141,7 +150,8 @@ DEFAULT_PROTECTION = {
 }
 
 # ============================================================
-# OUTPUT FILES
+# OUTPUT FILES  (base names; the CHID is prepended at run time
+# unless an explicit path is given in the config's "output" block)
 # ============================================================
 
 LOCATION_OUTPUT = "steel_temperature_locations.csv"
@@ -511,6 +521,7 @@ def plot_member(member, time, series, hottest_location, config):
 # Maps a config key -> the module-level global it overrides.
 _SCALAR_KEYS = {
     "input_csv": "INPUT_CSV",
+    "chid": "CHID",
     "grouping_method": "GROUPING_METHOD",
     "initial_steel_temp": "INITIAL_STEEL_TEMP",
     "max_time_step": "MAX_TIME_STEP",
@@ -527,6 +538,24 @@ _OUTPUT_KEYS = {
     "excel": "EXCEL_OUTPUT",
     "plot_dir": "PLOT_DIR",
 }
+
+# Output globals whose path the user set explicitly (config/CLI) and which must
+# therefore NOT receive the automatic CHID prefix.
+_OUTPUT_OVERRIDDEN = set()
+
+
+def derive_chid(input_csv):
+    """Return the CHID from an FDS input filename (``<CHID>_devc.csv``)."""
+    name = Path(input_csv).name
+    if name.lower().endswith("_devc.csv"):
+        return name[: -len("_devc.csv")]
+    return Path(name).stem
+
+
+def prefix_with_chid(path, chid):
+    """Prepend ``<chid>_`` to the file/dir name, keeping any parent directory."""
+    p = Path(path)
+    return p.parent / f"{chid}_{p.name}"
 
 
 def load_config(path):
@@ -573,6 +602,7 @@ def apply_config(cfg):
         if key in cfg.get("output", {}):
             value = cfg["output"][key]
             g[name] = Path(value) if name == "PLOT_DIR" else value
+            _OUTPUT_OVERRIDDEN.add(name)
 
     if "default_protection" in cfg:
         g["DEFAULT_PROTECTION"] = dict(cfg["default_protection"])
@@ -594,6 +624,10 @@ def parse_args(argv=None):
     parser.add_argument(
         "-i", "--input", metavar="CSV",
         help="FDS <CHID>_devc.csv file (overrides input_csv from config/defaults).")
+    parser.add_argument(
+        "--chid", metavar="CHID",
+        help="Scenario identifier prepended to output names "
+             "(default: derived from the input filename).")
     return parser.parse_args(argv)
 
 
@@ -608,6 +642,15 @@ def main(argv=None):
         apply_config(load_config(args.config))
     if args.input:
         globals()["INPUT_CSV"] = args.input
+    if args.chid:
+        globals()["CHID"] = args.chid
+
+    # Resolve the scenario CHID and prefix any output not set explicitly.
+    chid = CHID or derive_chid(INPUT_CSV)
+    for name in _OUTPUT_KEYS.values():
+        if name not in _OUTPUT_OVERRIDDEN:
+            globals()[name] = prefix_with_chid(globals()[name], chid)
+    print(f"CHID:    {chid}")
 
     print(f"Reading: {INPUT_CSV}")
     df, time_col = read_devc_csv(INPUT_CSV)

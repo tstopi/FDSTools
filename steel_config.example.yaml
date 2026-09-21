@@ -9,6 +9,8 @@
 
 # --- input / integration ---------------------------------------------------
 input_csv: fds_devc.csv        # FDS <CHID>_devc.csv (also settable with --input)
+# chid: Case_A                 # scenario id prepended to outputs; default: derived
+#                              # from input_csv (<CHID>_devc.csv). Also --chid.
 grouping_method: max           # "max" (conservative) or "mean" over a location's faces
 initial_steel_temp: 20.0       # deg C
 max_time_step: 5.0             # s; coarse FDS intervals are sub-stepped to this
@@ -26,10 +28,13 @@ steel:
   rho: 7850.0                 # kg/m3 (specific heat is temperature-dependent, per EN)
 
 # --- output files ----------------------------------------------------------
-output:
-  locations_csv: steel_temperature_locations.csv
-  excel: steel_fire_results.xlsx
-  plot_dir: member_plots
+# By default the base names below are prefixed with the CHID, e.g.
+# Case_A_steel_fire_results.xlsx, so scenarios never overwrite each other.
+# Uncomment an entry to set an explicit path; that disables the prefix for it.
+# output:
+#   locations_csv: steel_temperature_locations.csv
+#   excel: steel_fire_results.xlsx
+#   plot_dir: member_plots
 
 # --- fallback protection ---------------------------------------------------
 # Used when a member is flagged protected but supplies no "protection" block.
