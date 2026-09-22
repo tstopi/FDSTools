@@ -30,6 +30,10 @@ Members are matched to a configuration entry by longest family-prefix match:
 ``D_02`` ... inherit ``D_``. Matching stops at a letter boundary, so ``AP``
 does not swallow an unrelated ``APRON``.
 
+For each member a time-equivalence of fire exposure is also reported using the
+Cumulative Radiant Energy (CRE) method: the ISO 834 standard-fire duration whose
+cumulative radiant energy equals that of the natural (CFD/AST) exposure.
+
 Physics reference: EN 1993-1-2:2005, sections 3.4.1.2 (specific heat),
 4.2.5.1 (unprotected members) and 4.2.5.2 (protected members).
 
@@ -393,6 +397,78 @@ def find_critical_time(time, temperature, critical_temp):
 
 
 # ============================================================
+# TIME EQUIVALENCE - CUMULATIVE RADIANT ENERGY (CRE)
+# ============================================================
+# The severity of a fire exposure is characterised by the cumulative radiant
+# energy delivered to a surface. Radiation dominates at fire temperatures, so
+# the energy is proportional to the time integral of (T + 273.15)^4 measured
+# above the ambient baseline; the emissivity and Stefan-Boltzmann constant are
+# identical for the natural and standard exposures and therefore cancel.
+#
+# The CRE-equivalent time t_e is the ISO 834 standard-fire duration whose
+# cumulative radiant energy equals that of the natural (CFD/AST) exposure:
+#
+#     integral_0^t_fire  [ (T_ast + 273.15)^4 - (T0 + 273.15)^4 ]_+ dt
+#   = integral_0^t_e     [ (T_iso + 273.15)^4 - (T0 + 273.15)^4 ] dt
+#
+# The exposure temperature is the AST, so t_e depends only on the fire, not on
+# the section factor or protection.
+
+# Time-equivalence settings (overridable via the config "time_equivalence" block).
+TIME_EQUIVALENCE = True     # compute the CRE-equivalent time
+CRE_AMBIENT_TEMP = 20.0     # T0 baseline for the excess-radiant-energy integral
+CRE_MAX_EQUIV_TIME = 6 * 3600.0  # cap on the ISO search, s
+
+
+def iso834_temperature(t_seconds):
+    """ISO 834 standard fire temperature, deg C (t in seconds)."""
+    t = np.asarray(t_seconds, dtype=float)
+    return 20.0 + 345.0 * np.log10(8.0 * (t / 60.0) + 1.0)
+
+
+def _excess_radiant(temp_c, t0=None):
+    """Excess radiant emissive term (T+273.15)^4 - (T0+273.15)^4, floored at 0."""
+    if t0 is None:
+        t0 = CRE_AMBIENT_TEMP
+    base = (t0 + 273.15) ** 4
+    val = (np.asarray(temp_c, dtype=float) + 273.15) ** 4 - base
+    return np.clip(val, 0.0, None)
+
+
+# np.trapz was renamed to np.trapezoid in NumPy 2.x (and later removed).
+_trapz = np.trapezoid if hasattr(np, "trapezoid") else np.trapz
+
+
+def cumulative_radiant_energy(time, exposure_temp):
+    """Total cumulative radiant energy of an exposure (trapezoidal integral)."""
+    time = np.asarray(time, dtype=float)
+    return float(_trapz(_excess_radiant(exposure_temp), time))
+
+
+def equivalent_time_cre(time, exposure_temp):
+    """CRE-equivalent ISO 834 exposure time, s (None if the exposure is nil)."""
+    e_nat = cumulative_radiant_energy(time, exposure_temp)
+    if e_nat <= 0.0:
+        return 0.0
+
+    # Cumulative radiant energy of the ISO 834 curve on a 1 s grid.
+    dt = 1.0
+    grid = np.arange(0.0, CRE_MAX_EQUIV_TIME + dt, dt)
+    iso_excess = _excess_radiant(iso834_temperature(grid))
+    e_iso = np.concatenate(([0.0], np.cumsum((iso_excess[1:] + iso_excess[:-1]) * dt / 2.0)))
+
+    if e_nat >= e_iso[-1]:
+        return None  # exceeds the search cap; exposure hotter/longer than cap
+
+    i = int(np.searchsorted(e_iso, e_nat))
+    e1, e2 = e_iso[i - 1], e_iso[i]
+    if e2 - e1 < 1e-30:
+        return float(grid[i])
+    frac = (e_nat - e1) / (e2 - e1)
+    return float(grid[i - 1] + frac * dt)
+
+
+# ============================================================
 # CSV READER (handles the two-row FDS devc.csv header)
 # ============================================================
 
@@ -598,6 +674,14 @@ def apply_config(cfg):
     if "rho" in cfg.get("steel", {}):
         g["RHO_STEEL"] = cfg["steel"]["rho"]
 
+    te = cfg.get("time_equivalence", {})
+    if "enabled" in te:
+        g["TIME_EQUIVALENCE"] = bool(te["enabled"])
+    if "ambient_temp" in te:
+        g["CRE_AMBIENT_TEMP"] = te["ambient_temp"]
+    if "max_equiv_time" in te:
+        g["CRE_MAX_EQUIV_TIME"] = te["max_equiv_time"]
+
     for key, name in _OUTPUT_KEYS.items():
         if key in cfg.get("output", {}):
             value = cfg["output"][key]
@@ -666,6 +750,7 @@ def main(argv=None):
 
     # --- integrate every location ---------------------------------------
     location_data: dict[str, np.ndarray] = {"Time": time}
+    location_ast: dict[str, np.ndarray] = {}
     member_locations: dict[str, list[str]] = {}
 
     for (member, location), devs in sorted(groups.items()):
@@ -679,6 +764,7 @@ def main(argv=None):
 
         key = f"{member}_{location}"
         location_data[key] = steel
+        location_ast[key] = ast
         member_locations.setdefault(member, []).append(key)
 
     # Build in one shot to avoid DataFrame fragmentation.
@@ -706,7 +792,7 @@ def main(argv=None):
         member_hottest[member] = (hottest_key, series, cfg)
         peaks_data[member] = series
 
-        summary_rows.append({
+        row = {
             "Member": member,
             "Hottest Location": hottest_key,
             "Maximum Temperature (C)": round(tmax, 1),
@@ -715,7 +801,18 @@ def main(argv=None):
             "Critical Time (s)": round(t_crit, 1) if t_crit is not None else None,
             "Protected": cfg.protected,
             "Protection Thickness (m)": cfg.protection["thickness"] if cfg.protected else None,
-        })
+        }
+
+        if TIME_EQUIVALENCE:
+            # CRE-equivalent time from the most severe exposure (max cumulative
+            # radiant energy) among the member's locations.
+            worst_loc = max(locs, key=lambda k: cumulative_radiant_energy(time, location_ast[k]))
+            t_eq = equivalent_time_cre(time, location_ast[worst_loc])
+            row["CRE Equivalent Time (s)"] = round(t_eq, 1) if t_eq is not None else None
+            row["CRE Equivalent Time (min)"] = round(t_eq / 60.0, 1) if t_eq is not None else None
+            row["CRE Exposure Location"] = worst_loc
+
+        summary_rows.append(row)
 
     summary_df = pd.DataFrame(summary_rows)
     peaks = pd.DataFrame(peaks_data)
@@ -756,9 +853,13 @@ def main(argv=None):
         status = ""
         if not pd.isna(r["Critical Temperature (C)"]):
             status = "EXCEEDED" if not pd.isna(util_val) and util_val >= 1.0 else "OK"
+        teq = ""
+        if TIME_EQUIVALENCE:
+            t_eq = r.get("CRE Equivalent Time (min)")
+            teq = f"  t_eq(CRE)={t_eq:>5.1f} min" if not pd.isna(t_eq) else "  t_eq(CRE)=  >cap"
         print(f"  {r['Member']:<8} hottest {r['Hottest Location']:<14} "
               f"Tmax={r['Maximum Temperature (C)']:>6.1f} C  "
-              f"util={util:>5}  t_crit={crit_t:<12} {status}")
+              f"util={util:>5}  t_crit={crit_t:<12} {status}{teq}")
     print("=" * 64)
 
 
