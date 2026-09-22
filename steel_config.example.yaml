@@ -27,6 +27,14 @@ fire:
 steel:
   rho: 7850.0                 # kg/m3 (specific heat is temperature-dependent, per EN)
 
+# --- time equivalence (Cumulative Radiant Energy) --------------------------
+# Equivalent ISO 834 exposure time whose cumulative radiant energy matches the
+# natural (CFD/AST) fire. Reported per member for its most severe location.
+time_equivalence:
+  enabled: true
+  ambient_temp: 20.0          # T0 baseline for the excess-radiant-energy integral
+  max_equiv_time: 21600       # cap on the ISO 834 search, s (6 h)
+
 # --- output files ----------------------------------------------------------
 # By default the base names below are prefixed with the CHID, e.g.
 # Case_A_steel_fire_results.xlsx, so scenarios never overwrite each other.
