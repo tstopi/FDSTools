@@ -12,6 +12,8 @@ input_csv: fds_devc.csv        # FDS <CHID>_devc.csv (also settable with --input
 # chid: Case_A                 # scenario id prepended to outputs; default: derived
 #                              # from input_csv (<CHID>_devc.csv). Also --chid.
 grouping_method: max           # "max" (conservative) or "mean" over a location's faces
+# fds_input: Case_A.fds        # FDS input whose &DEVC lines (and &CATF includes)
+#                              # locate the devices; enables the failure maps. Also --fds.
 initial_steel_temp: 20.0       # deg C
 max_time_step: 5.0             # s; coarse FDS intervals are sub-stepped to this
 
@@ -35,6 +37,13 @@ time_equivalence:
   ambient_temp: 20.0          # T0 baseline for the excess-radiant-energy integral
   max_equiv_time: 21600       # cap on the ISO 834 search, s (6 h)
 
+# --- failure-location maps (only when fds_input / --fds is given) -----------
+# Times are rounded down to whole minutes and grouped from the first failure.
+failure_map:
+  # interval_min: 5           # failure-time class width in whole minutes
+                              # (default: automatic; CRE always automatic)
+  n_classes: 4                # target number of classes when automatic
+
 # --- output files ----------------------------------------------------------
 # By default the base names below are prefixed with the CHID, e.g.
 # Case_A_steel_fire_results.xlsx, so scenarios never overwrite each other.
@@ -43,6 +52,7 @@ time_equivalence:
 #   locations_csv: steel_temperature_locations.csv
 #   excel: steel_fire_results.xlsx
 #   plot_dir: member_plots
+#   failure_map: failure_map    # stem; _tcrit.png / _cre.png are appended
 
 # --- fallback protection ---------------------------------------------------
 # Used when a member is flagged protected but supplies no "protection" block.

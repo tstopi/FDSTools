@@ -16,6 +16,8 @@ Outputs (each prefixed with the scenario CHID, e.g. ``Case_A_...``)
 * ``<CHID>_steel_temperature_locations.csv`` - steel temperatures, all locations
 * ``<CHID>_steel_fire_results.xlsx``         - workbook (summary/locations/peaks/config)
 * ``<CHID>_member_plots/*.png``              - one temperature plot per member
+* ``<CHID>_failure_map_tcrit.png`` / ``_cre.png`` - failure-location maps
+  (only with ``--fds``; see below)
 
 The CHID is taken from ``--chid`` / the config, or derived from the input
 filename (``<CHID>_devc.csv``), so several scenarios can be post-processed in
@@ -48,6 +50,22 @@ or drive everything from an external YAML/JSON config (see
 
     python steel_temperature.py --config my_project.yaml
     python steel_temperature.py --config my_project.yaml --input CHID_devc.csv
+
+Failure-location maps
+---------------------
+Given the FDS input file (``--fds model.fds``), the &DEVC lines - including
+those in &CATF include files - are matched to the AST devices, and each member
+location is placed at the centroid of its face devices. Two maps are written
+(plan, two elevations and an isometric view; views that collapse to a line,
+e.g. the plan of a planar truss, are left out): the time to reach the critical
+temperature, and the CRE equivalent time. Times are rounded down to whole
+minutes and grouped into classes starting at the first failure, either every
+``--failure-interval`` minutes or automatically into about
+``--failure-classes`` (default 4) classes of a readable width. The CRE map
+always uses automatic classes::
+
+    python steel_temperature.py --input CHID_devc.csv --fds CHID.fds
+    python steel_temperature.py --input CHID_devc.csv --fds CHID.fds --failure-interval 5
 """
 
 from __future__ import annotations
@@ -63,6 +81,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless: no display required
 import matplotlib.pyplot as plt
+import matplotlib.ticker
 import numpy as np
 import pandas as pd
 
@@ -80,6 +99,16 @@ CHID = None
 # How the AST devices on the faces of one location are combined into a single
 # thermal boundary condition. "max" is conservative and recommended.
 GROUPING_METHOD = "max"  # "max" or "mean"
+
+# FDS input file whose &DEVC lines give the device coordinates. When set (or
+# given with --fds) the failure-location maps are produced; None disables them.
+FDS_INPUT = None
+
+# Failure-time classes for the maps: times are rounded down to whole minutes and
+# grouped from the first failure in steps of FAILURE_INTERVAL minutes, or - when
+# None - in a readable step chosen to give about FAILURE_CLASSES classes.
+FAILURE_INTERVAL = None
+FAILURE_CLASSES = 4
 
 INITIAL_STEEL_TEMP = 20.0  # deg C
 
@@ -161,6 +190,8 @@ DEFAULT_PROTECTION = {
 LOCATION_OUTPUT = "steel_temperature_locations.csv"
 EXCEL_OUTPUT = "steel_fire_results.xlsx"
 PLOT_DIR = Path("member_plots")
+# Stem of the failure maps; "_tcrit.png" and "_cre.png" are appended.
+FAILURE_MAP_OUTPUT = "failure_map"
 
 
 # ============================================================
@@ -501,8 +532,12 @@ def read_devc_csv(path):
 # EXCEL WORKBOOK
 # ============================================================
 
-def write_excel(path, summary_df, location_df, peaks_df, config_df):
-    """Write the four-sheet results workbook with conditional formatting."""
+def write_excel(path, summary_df, location_df, peaks_df, config_df, map_df=None):
+    """Write the results workbook with conditional formatting.
+
+    *map_df*, when given, is written as a "Location Map" sheet after the
+    member summary.
+    """
     from openpyxl.styles import Font, PatternFill
     from openpyxl.utils import get_column_letter
 
@@ -513,6 +548,8 @@ def write_excel(path, summary_df, location_df, peaks_df, config_df):
 
     with pd.ExcelWriter(path, engine="openpyxl") as xl:
         summary_df.to_excel(xl, sheet_name="Member Summary", index=False)
+        if map_df is not None:
+            map_df.to_excel(xl, sheet_name="Location Map", index=False)
         location_df.to_excel(xl, sheet_name="Location Temperatures", index=False)
         peaks_df.to_excel(xl, sheet_name="Member Peaks", index=False)
         config_df.to_excel(xl, sheet_name="Configuration", index=False)
@@ -587,6 +624,342 @@ def plot_member(member, time, series, hottest_location, config):
 
 
 # ============================================================
+# FDS INPUT - DEVICE LOCATIONS
+# ============================================================
+# Each namelist record starts with "&NAME" as the first non-blank text on a
+# line and ends at the first "/" outside a quoted string, so a record may span
+# several lines and its strings may contain slashes (e.g. file paths).
+
+_NAMELIST_START = re.compile(r"(?m)^[ \t]*&([A-Za-z_]+)")
+_NUMBER = r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eEdD][-+]?\d+)?"
+
+
+def _iter_namelists(text):
+    """Yield ``(NAME, body)`` for every namelist record in an FDS input."""
+    pos = 0
+    while True:
+        m = _NAMELIST_START.search(text, pos)
+        if not m:
+            return
+        quote = None
+        j = m.end()
+        while j < len(text):
+            ch = text[j]
+            if quote:
+                if ch == quote:
+                    quote = None
+            elif ch in "'\"":
+                quote = ch
+            elif ch == "/":
+                break
+            j += 1
+        yield m.group(1).upper(), text[m.end():j]
+        pos = j + 1
+
+
+def _string_param(body, key):
+    """Value of a quoted parameter, e.g. ID='AP_F1_001' (None if absent)."""
+    m = re.search(rf"(?<![A-Za-z0-9_]){key}\s*=\s*(['\"])(.*?)\1", body,
+                  re.IGNORECASE | re.DOTALL)
+    return m.group(2).strip() if m else None
+
+
+def _numeric_param(body, key, count):
+    """First *count* numbers of a parameter, e.g. XYZ=1,2,3 (None if absent)."""
+    m = re.search(rf"(?<![A-Za-z0-9_]){key}\s*=\s*((?:{_NUMBER}[\s,]*)+)", body,
+                  re.IGNORECASE)
+    if not m:
+        return None
+    values = re.findall(_NUMBER, m.group(1))
+    if len(values) < count:
+        return None
+    return np.array([float(v.replace("d", "e").replace("D", "e"))
+                     for v in values[:count]])
+
+
+def parse_devc_locations(fds_file, _seen=None):
+    """Map device ID -> {"xyz", "orientation", "quantity", "source"}.
+
+    Reads every &DEVC record of *fds_file*, following &CATF OTHER_FILES
+    includes (relative to the including file). A device given by XB is placed
+    at the centre of its box.
+    """
+    path = Path(fds_file)
+    seen = set() if _seen is None else _seen
+    resolved = path.resolve()
+    if resolved in seen:
+        return {}
+    seen.add(resolved)
+    if not path.exists():
+        print(f"  WARNING: FDS file not found: {path}")
+        return {}
+
+    devices = {}
+    text = path.read_text(errors="replace")
+    for name, body in _iter_namelists(text):
+        if name == "CATF":
+            m = re.search(r"OTHER_FILES\s*=(.*)", body, re.IGNORECASE | re.DOTALL)
+            for _, other in re.findall(r"(['\"])(.*?)\1", m.group(1) if m else ""):
+                included = parse_devc_locations(path.parent / other.strip(), seen)
+                for dev_id, info in included.items():
+                    if dev_id in devices:
+                        print(f"  WARNING: duplicate DEVC ID {dev_id!r} in "
+                              f"{info['source']}; keeping the first.")
+                        continue
+                    devices[dev_id] = info
+            continue
+        if name != "DEVC":
+            continue
+
+        dev_id = _string_param(body, "ID")
+        if not dev_id:
+            continue
+        xyz = _numeric_param(body, "XYZ", 3)
+        if xyz is None:
+            xb = _numeric_param(body, "XB", 6)
+            if xb is None:
+                continue
+            xyz = np.array([(xb[0] + xb[1]) / 2, (xb[2] + xb[3]) / 2,
+                            (xb[4] + xb[5]) / 2])
+        if dev_id in devices:
+            print(f"  WARNING: duplicate DEVC ID {dev_id!r} in {path.name}; "
+                  "keeping the first.")
+            continue
+        devices[dev_id] = {
+            "xyz": xyz,
+            "orientation": _numeric_param(body, "ORIENTATION", 3),
+            "quantity": _string_param(body, "QUANTITY"),
+            "source": path.name,
+        }
+    return devices
+
+
+def location_coordinates(groups, devices):
+    """Centroid of each location's face devices.
+
+    Returns ``({location_key: (xyz, n_devices)}, [device IDs without a &DEVC])``.
+    """
+    coords = {}
+    missing = []
+    for (member, location), devs in groups.items():
+        points = [devices[d]["xyz"] for d in devs if d in devices]
+        missing.extend(d for d in devs if d not in devices)
+        if points:
+            coords[f"{member}_{location}"] = (np.mean(points, axis=0), len(points))
+    return coords, missing
+
+
+# ============================================================
+# FAILURE-TIME CLASSES
+# ============================================================
+# Times are rounded DOWN to whole minutes (conservative, no sub-minute values)
+# and grouped into classes that start at the first failure t0:
+#
+#     class(t) = t0 + floor((t - t0) / step) * step        [minutes]
+#
+# The step is FAILURE_INTERVAL when given, otherwise the smallest readable step
+# that yields at most FAILURE_CLASSES classes.
+
+READABLE_STEPS_MIN = (1, 2, 3, 5, 10, 15, 20, 30, 60)
+
+
+def floor_minutes(t_seconds):
+    """Whole minutes, rounded down; None for a missing time."""
+    if t_seconds is None or pd.isna(t_seconds):
+        return None
+    return int(np.floor(t_seconds / 60.0 + 1e-9))
+
+
+def choose_interval(t_first, t_last, n_classes):
+    """Smallest readable step (min) giving at most *n_classes* classes."""
+    need = max(1, int(np.ceil((t_last - t_first + 1) / max(1, int(n_classes)))))
+    for step in READABLE_STEPS_MIN:
+        if step >= need:
+            return step
+    return int(np.ceil(need / 60.0)) * 60
+
+
+def failure_classes(minutes, interval=None, n_classes=4):
+    """Group whole-minute times into classes.
+
+    *minutes* maps a key to whole minutes (or None). Returns None when no key
+    has a time, else a dict with ``t0`` (first time), ``step``, ``assign``
+    (key -> class start or None) and ``starts`` (non-empty class starts).
+    """
+    values = [m for m in minutes.values() if m is not None]
+    if not values:
+        return None
+    t0, t_last = min(values), max(values)
+    step = choose_interval(t0, t_last, n_classes) if not interval else int(interval)
+    step = max(1, step)
+    assign = {k: (None if m is None else t0 + ((m - t0) // step) * step)
+              for k, m in minutes.items()}
+    starts = sorted({s for s in assign.values() if s is not None})
+    return {"t0": t0, "step": step, "assign": assign, "starts": starts}
+
+
+def class_label(start, step):
+    return f"{start} min" if step == 1 else f"{start}–{start + step - 1} min"
+
+
+# ============================================================
+# FAILURE-LOCATION MAPS
+# ============================================================
+
+# One-hue ordinal ramp (light -> dark), validated for up to five classes on the
+# light surface; more classes are interpolated and also get distinct markers.
+_ORDINAL_RAMP = ["#86b6ef", "#6da7ec", "#5598e7", "#3987e5", "#2a78d6",
+                 "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
+_CLASS_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "h"]
+_SURFACE = "#fcfcfb"
+_INK = "#0b0b0b"
+_INK_2 = "#52514e"
+_MUTED = "#c3c2b7"
+_MEMBER_LINE = "#dcdbd5"
+
+
+def _class_styles(n):
+    """(colour, marker) per class, ordered light -> dark."""
+    if n <= 5:
+        idx = [6] if n == 1 else np.round(np.linspace(0, 9, n)).astype(int)
+        colours = [_ORDINAL_RAMP[i] for i in idx]
+        markers = ["o"] * n
+    else:
+        cmap = matplotlib.colors.LinearSegmentedColormap.from_list("ord", _ORDINAL_RAMP)
+        colours = [matplotlib.colors.to_hex(cmap(v)) for v in np.linspace(0, 1, n)]
+        markers = [_CLASS_MARKERS[i % len(_CLASS_MARKERS)] for i in range(n)]
+    return list(zip(colours, markers))
+
+
+def plot_failure_map(path, points, classes, *, title, early_is_severe,
+                     highlight, highlight_label, unassigned_label):
+    """Write a plan / two elevations / isometric map of classified locations.
+
+    *points* has columns key, member, location, x, y, z. *classes* is the
+    result of :func:`failure_classes`. When *early_is_severe* the earliest
+    class is drawn darkest (failure time); otherwise the latest (CRE).
+    *highlight* is a list of keys ringed and listed as *highlight_label*.
+    """
+    starts = classes["starts"]
+    step = classes["step"]
+    styles = _class_styles(len(starts))
+    if early_is_severe:
+        styles = styles[::-1]
+    style_of = dict(zip(starts, styles))
+    # Most severe class drawn last so it sits on top.
+    draw_order = starts[::-1] if early_is_severe else starts
+
+    pts = points.copy()
+    pts["cls"] = pts["key"].map(classes["assign"])
+    unassigned = pts[pts["cls"].isna()]
+
+    # Drop views that collapse to a line: an axis spanning < 2 % of the model
+    # (e.g. y for a planar truss). A planar model gets one large elevation.
+    spans = {c: float(np.ptp(pts[c].to_numpy())) for c in ("x", "y", "z")}
+    biggest = max(spans.values()) or 1.0
+    flat = {c for c, v in spans.items() if v < 0.02 * biggest}
+    candidates = [("x", "y", "Plan (x–y)"),
+                  ("x", "z", "Elevation (x–z)"),
+                  ("y", "z", "Elevation (y–z)")]
+    planes = [v for v in candidates if v[0] not in flat and v[1] not in flat]
+    if not planes:  # all points on a line: use the two widest axes
+        a, b = sorted(sorted(spans, key=spans.get)[-2:])
+        planes = [next(v for v in candidates if v[:2] == (a, b))]
+    show_iso = not flat
+    n_views = len(planes) + int(show_iso)
+    rows, cols = (1, n_views) if n_views <= 2 else (2, 2)
+    if n_views == 1:
+        # Size a single view to the model's proportions (within limits).
+        a, b = planes[0][:2]
+        ratio = spans[b] / max(spans[a], 1e-9)
+        height = float(np.clip(13.5 * ratio, 3.0, 9.0)) + 2.2
+    else:
+        height = 7.0 if rows == 1 else 11.0
+    fig = plt.figure(figsize=(15, height), facecolor=_SURFACE)
+    views = [(fig.add_subplot(rows, cols, i + 1), a, b, label)
+             for i, (a, b, label) in enumerate(planes)]
+    ax3d = (fig.add_subplot(rows, cols, n_views, projection="3d")
+            if show_iso else None)
+
+    def draw(ax, cols):
+        # Members as faint lines through their locations, in location order.
+        for _, grp in pts.groupby("member"):
+            grp = grp.sort_values("location")
+            ax.plot(*(grp[c] for c in cols), color=_MEMBER_LINE, lw=1.0, zorder=1)
+        if len(unassigned):
+            ax.scatter(*(unassigned[c] for c in cols), s=10, color=_MUTED,
+                       linewidths=0, zorder=2)
+        for z, start in enumerate(draw_order, start=3):
+            sel = pts[pts["cls"] == start]
+            colour, marker = style_of[start]
+            ax.scatter(*(sel[c] for c in cols), s=42, color=colour, marker=marker,
+                       edgecolors=_SURFACE, linewidths=0.8, zorder=z)
+        ring = pts[pts["key"].isin(highlight)]
+        ax.scatter(*(ring[c] for c in cols), s=170, facecolors="none",
+                   edgecolors=_INK, linewidths=1.4, zorder=len(starts) + 4)
+
+    for ax, a, b, label in views:
+        draw(ax, (a, b))
+        ax.set_aspect("equal", adjustable="datalim")
+        ax.set_title(label, color=_INK, fontsize=11, loc="left")
+        ax.set_xlabel(f"{a} (m)", color=_INK_2)
+        ax.set_ylabel(f"{b} (m)", color=_INK_2)
+        ax.grid(True, color="#e6e5e0", lw=0.6)
+        ax.set_facecolor(_SURFACE)
+        ax.tick_params(colors=_INK_2, labelsize=8)
+        for spine in ax.spines.values():
+            spine.set_color("#d4d3cd")
+
+    if ax3d is not None:
+        draw(ax3d, ("x", "y", "z"))
+        # Keep thin directions at least a quarter of the longest so the view
+        # stays readable (the 2D panels carry the true proportions).
+        ax3d.set_box_aspect([max(spans[c], 0.25 * biggest) for c in ("x", "y", "z")])
+        for axis in (ax3d.xaxis, ax3d.yaxis, ax3d.zaxis):
+            axis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
+        ax3d.view_init(elev=25, azim=-60)
+        ax3d.set_title("Isometric", color=_INK, fontsize=11, loc="left")
+        ax3d.set_facecolor(_SURFACE)
+        for axis_name in ("x", "y", "z"):
+            getattr(ax3d, f"set_{axis_name}label")(f"{axis_name} (m)", color=_INK_2)
+        ax3d.tick_params(colors=_INK_2, labelsize=7)
+
+    # Legend: classes from most to least severe, then the neutral entries.
+    handles, labels = [], []
+    legend_order = starts if early_is_severe else starts[::-1]
+    for start in legend_order:
+        colour, marker = style_of[start]
+        n = int((pts["cls"] == start).sum())
+        handles.append(plt.Line2D([], [], ls="", marker=marker, ms=8, color=colour,
+                                  markeredgecolor=_SURFACE))
+        labels.append(f"{class_label(start, step)}  ({n})")
+    if len(unassigned):
+        handles.append(plt.Line2D([], [], ls="", marker="o", ms=5, color=_MUTED))
+        labels.append(f"{unassigned_label}  ({len(unassigned)})")
+    handles.append(plt.Line2D([], [], ls="", marker="o", ms=11, mfc="none",
+                              mec=_INK, mew=1.4))
+    labels.append(highlight_label)
+    handles.append(plt.Line2D([], [], color=_MEMBER_LINE, lw=1.5))
+    labels.append("Member")
+    # One row keeps the classes in reading order (legend columns fill downwards).
+    ncol = len(labels) if len(labels) <= 8 else int(np.ceil(len(labels) / 2))
+    fig.legend(handles, labels, loc="lower center", ncol=ncol,
+               frameon=False, fontsize=9, labelcolor=_INK)
+
+    # Title block at fixed distances (inches) from the top of the figure.
+    fig.suptitle(title, color=_INK, fontsize=13, x=0.02, y=1 - 0.2 / height,
+                 ha="left", va="top")
+    fig.text(0.02, 1 - 0.55 / height,
+             f"Times rounded down to whole minutes; classes of {step} min "
+             f"starting at {classes['t0']} min.",
+             color=_INK_2, fontsize=9, ha="left", va="top")
+    fig.tight_layout(rect=(0, 0.55 / height, 1, 1 - 0.8 / height))
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=200, facecolor=_SURFACE)
+    plt.close(fig)
+
+
+# ============================================================
 # EXTERNAL CONFIGURATION (YAML / JSON)
 # ============================================================
 # Everything under USER SETTINGS / MEMBER PROPERTIES above acts as the built-in
@@ -601,6 +974,7 @@ _SCALAR_KEYS = {
     "grouping_method": "GROUPING_METHOD",
     "initial_steel_temp": "INITIAL_STEEL_TEMP",
     "max_time_step": "MAX_TIME_STEP",
+    "fds_input": "FDS_INPUT",
 }
 _FIRE_KEYS = {
     "alpha_c": "ALPHA_C",
@@ -613,6 +987,7 @@ _OUTPUT_KEYS = {
     "locations_csv": "LOCATION_OUTPUT",
     "excel": "EXCEL_OUTPUT",
     "plot_dir": "PLOT_DIR",
+    "failure_map": "FAILURE_MAP_OUTPUT",
 }
 
 # Output globals whose path the user set explicitly (config/CLI) and which must
@@ -682,6 +1057,12 @@ def apply_config(cfg):
     if "max_equiv_time" in te:
         g["CRE_MAX_EQUIV_TIME"] = te["max_equiv_time"]
 
+    fm = cfg.get("failure_map", {})
+    if "interval_min" in fm:
+        g["FAILURE_INTERVAL"] = fm["interval_min"]
+    if "n_classes" in fm:
+        g["FAILURE_CLASSES"] = fm["n_classes"]
+
     for key, name in _OUTPUT_KEYS.items():
         if key in cfg.get("output", {}):
             value = cfg["output"][key]
@@ -712,7 +1093,161 @@ def parse_args(argv=None):
         "--chid", metavar="CHID",
         help="Scenario identifier prepended to output names "
              "(default: derived from the input filename).")
+    parser.add_argument(
+        "--fds", metavar="FDS",
+        help="FDS input file; its &DEVC lines locate the devices and enable "
+             "the failure-location maps.")
+    parser.add_argument(
+        "--failure-interval", metavar="MIN", type=int,
+        help="Failure-time class width in whole minutes (default: automatic).")
+    parser.add_argument(
+        "--failure-classes", metavar="N", type=int,
+        help="Target number of failure-time classes when the interval is "
+             "automatic (default 4).")
     return parser.parse_args(argv)
+
+
+# ============================================================
+# FAILURE-MAP ASSEMBLY
+# ============================================================
+
+def _whole_number_setting(value, name, minimum=1):
+    """Coerce a setting to a whole number >= minimum, rounding down (None passes)."""
+    if value is None:
+        return None
+    whole = max(minimum, int(np.floor(float(value))))
+    if whole != value:
+        print(f"  NOTE: {name}={value} used as {whole} (whole number, >= {minimum}).")
+    return whole
+
+
+def locate_devices(fds_file, groups, csv_devices):
+    """Parse the FDS input and return the location centroids (with warnings)."""
+    if not Path(fds_file).exists():
+        raise SystemExit(f"FDS input file not found: {fds_file}")
+    devices = parse_devc_locations(fds_file)
+    coords, missing = location_coordinates(groups, devices)
+    print(f"FDS:     {fds_file} - {len(devices)} &DEVC records, "
+          f"{len(coords)}/{len(groups)} locations placed.")
+    if missing:
+        print(f"  WARNING: {len(missing)} AST device(s) in the CSV have no &DEVC "
+              f"line (e.g. {missing[0]!r}); their locations use the other faces "
+              "or are left off the map.")
+    unused = [d for d in devices
+              if parse_device_name(d) is not None and d not in csv_devices]
+    if unused:
+        print(f"  NOTE: {len(unused)} AST-style &DEVC ID(s) are not in the CSV "
+              f"(e.g. {unused[0]!r}).")
+    return coords
+
+
+def build_location_map(time, member_locations, location_results, location_ast,
+                       coords):
+    """One row per placed location: coordinates, peak, failure and CRE times."""
+    rows = []
+    for member in sorted(member_locations):
+        cfg = get_member_config(member)
+        for key in member_locations[member]:
+            if key not in coords:
+                continue
+            xyz, n_dev = coords[key]
+            steel = location_results[key].to_numpy(dtype=float)
+            t_crit = find_critical_time(time, steel, cfg.critical_temp)
+            row = {
+                "Location": key,
+                "Member": member,
+                "X (m)": round(float(xyz[0]), 4),
+                "Y (m)": round(float(xyz[1]), 4),
+                "Z (m)": round(float(xyz[2]), 4),
+                "Devices": n_dev,
+                "Maximum Temperature (C)": round(float(steel.max()), 1),
+                "Critical Temperature (C)": cfg.critical_temp,
+                "Critical Time (s)": round(t_crit, 1) if t_crit is not None else None,
+                "Failure Time (min)": floor_minutes(t_crit),
+            }
+            if TIME_EQUIVALENCE:
+                t_eq = equivalent_time_cre(time, location_ast[key])
+                row["CRE Equivalent Time (min)"] = floor_minutes(t_eq)
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def classify_location_map(map_df):
+    """Add class columns to *map_df*; return {"tcrit": classes, "cre": classes}.
+
+    FAILURE_INTERVAL applies to the failure times; the CRE equivalent times
+    always use automatic classes (about FAILURE_CLASSES of them).
+    """
+    result = {}
+    columns = [("tcrit", "Failure Time (min)", "Failure Class", FAILURE_INTERVAL)]
+    if "CRE Equivalent Time (min)" in map_df:
+        columns.append(("cre", "CRE Equivalent Time (min)", "CRE Class", None))
+    for name, source, target, interval in columns:
+        minutes = {k: (None if pd.isna(v) else int(v))
+                   for k, v in zip(map_df["Location"], map_df[source])}
+        classes = failure_classes(minutes, interval, FAILURE_CLASSES)
+        result[name] = classes
+        if classes is None:
+            map_df[target] = None
+            continue
+        map_df[target] = [
+            None if classes["assign"][k] is None
+            else class_label(classes["assign"][k], classes["step"])
+            for k in map_df["Location"]]
+    return result
+
+
+def write_failure_maps(map_df, classes, chid):
+    """Plot the failure-time and CRE maps; print a short class summary."""
+    points = pd.DataFrame({
+        "key": map_df["Location"],
+        "member": map_df["Member"],
+        "location": [k[len(m) + 1:] for k, m in zip(map_df["Location"], map_df["Member"])],
+        "x": map_df["X (m)"], "y": map_df["Y (m)"], "z": map_df["Z (m)"],
+    })
+    stem = str(FAILURE_MAP_OUTPUT)
+    written = []
+
+    tc = classes.get("tcrit")
+    print("\nFAILURE MAP")
+    if tc is None:
+        print("  Critical temperature not reached at any placed location - "
+              "no failure-time map.")
+    else:
+        first = map_df.loc[map_df["Failure Time (min)"] == tc["t0"], "Location"].tolist()
+        path = f"{stem}_tcrit.png"
+        plot_failure_map(
+            path, points, tc,
+            title=f"{chid}: time to reach the critical steel temperature",
+            early_is_severe=True, highlight=first,
+            highlight_label=f"First failure ({tc['t0']} min)",
+            unassigned_label="Not reached / no criterion")
+        written.append(path)
+        extra = f" (+{len(first) - 1} more)" if len(first) > 1 else ""
+        print(f"  First failure: {tc['t0']} min at {first[0]}{extra}")
+        counts = map_df["Failure Class"].value_counts()
+        parts = [f"{class_label(s, tc['step'])}: {counts.get(class_label(s, tc['step']), 0)}"
+                 for s in tc["starts"]]
+        n_none = int(map_df["Failure Class"].isna().sum())
+        print(f"  Classes of {tc['step']} min: " + " | ".join(parts)
+              + f" | not reached: {n_none}")
+
+    cre = classes.get("cre")
+    if cre is not None:
+        top = int(map_df["CRE Equivalent Time (min)"].max())
+        worst = map_df.loc[map_df["CRE Equivalent Time (min)"] == top, "Location"].tolist()
+        path = f"{stem}_cre.png"
+        plot_failure_map(
+            path, points, cre,
+            title=f"{chid}: CRE equivalent time of fire exposure",
+            early_is_severe=False, highlight=worst,
+            highlight_label=f"Most severe exposure ({top} min)",
+            unassigned_label="Beyond CRE search cap")
+        written.append(path)
+        print(f"  CRE equivalent time: {cre['t0']}–{top} min "
+              f"(classes of {cre['step']} min)")
+    for path in written:
+        print(f"  Saved {path}")
 
 
 # ============================================================
@@ -728,6 +1263,16 @@ def main(argv=None):
         globals()["INPUT_CSV"] = args.input
     if args.chid:
         globals()["CHID"] = args.chid
+    if args.fds:
+        globals()["FDS_INPUT"] = args.fds
+    if args.failure_interval is not None:
+        globals()["FAILURE_INTERVAL"] = args.failure_interval
+    if args.failure_classes is not None:
+        globals()["FAILURE_CLASSES"] = args.failure_classes
+    globals()["FAILURE_INTERVAL"] = _whole_number_setting(
+        FAILURE_INTERVAL, "failure interval (min)")
+    globals()["FAILURE_CLASSES"] = _whole_number_setting(
+        FAILURE_CLASSES, "failure classes")
 
     # Resolve the scenario CHID and prefix any output not set explicitly.
     chid = CHID or derive_chid(INPUT_CSV)
@@ -772,6 +1317,17 @@ def main(argv=None):
     location_results.to_csv(LOCATION_OUTPUT, index=False)
     print(f"Saved {LOCATION_OUTPUT}")
 
+    # --- device coordinates (failure maps) ------------------------------
+    coords = locate_devices(FDS_INPUT, groups, set(device_columns)) if FDS_INPUT else {}
+
+    def hottest_xyz(key):
+        if key not in coords:
+            return {}
+        xyz = coords[key][0]
+        return {"Hottest X (m)": round(float(xyz[0]), 4),
+                "Hottest Y (m)": round(float(xyz[1]), 4),
+                "Hottest Z (m)": round(float(xyz[2]), 4)}
+
     # --- hottest location + assessment per member -----------------------
     summary_rows = []
     peaks_data: dict[str, np.ndarray] = {"Time": time}
@@ -795,6 +1351,7 @@ def main(argv=None):
         row = {
             "Member": member,
             "Hottest Location": hottest_key,
+            **hottest_xyz(hottest_key),
             "Maximum Temperature (C)": round(tmax, 1),
             "Critical Temperature (C)": crit,
             "Utilisation": round(util, 3) if util is not None else None,
@@ -833,7 +1390,15 @@ def main(argv=None):
         })
     config_df = pd.DataFrame(config_rows)
 
-    write_excel(EXCEL_OUTPUT, summary_df, location_results, peaks, config_df)
+    map_df = None
+    map_classes = {}
+    if coords:
+        map_df = build_location_map(time, member_locations, location_results,
+                                    location_ast, coords)
+        map_classes = classify_location_map(map_df)
+
+    write_excel(EXCEL_OUTPUT, summary_df, location_results, peaks, config_df,
+                map_df)
     print(f"Saved {EXCEL_OUTPUT}")
 
     # --- plots ----------------------------------------------------------
@@ -861,6 +1426,9 @@ def main(argv=None):
               f"Tmax={r['Maximum Temperature (C)']:>6.1f} C  "
               f"util={util:>5}  t_crit={crit_t:<12} {status}{teq}")
     print("=" * 64)
+
+    if map_df is not None and not map_df.empty:
+        write_failure_maps(map_df, map_classes, chid)
 
 
 if __name__ == "__main__":
