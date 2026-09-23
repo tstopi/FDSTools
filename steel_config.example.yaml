@@ -43,6 +43,7 @@ failure_map:
   # interval_min: 5           # failure-time class width in whole minutes
                               # (default: automatic; CRE always automatic)
   n_classes: 4                # target number of classes when automatic
+  heatmap_cell: 0.5           # cell size (m) of the plan heat map and contours
 
 # --- output files ----------------------------------------------------------
 # By default the base names below are prefixed with the CHID, e.g.
@@ -52,7 +53,7 @@ failure_map:
 #   locations_csv: steel_temperature_locations.csv
 #   excel: steel_fire_results.xlsx
 #   plot_dir: member_plots
-#   failure_map: failure_map    # stem; _tcrit.png / _cre.png are appended
+#   failure_map: failure_map    # stem; _tcrit_<view>.png / _cre_<view>.png appended
 
 # --- fallback protection ---------------------------------------------------
 # Used when a member is flagged protected but supplies no "protection" block.

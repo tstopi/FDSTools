@@ -16,8 +16,10 @@ Outputs (each prefixed with the scenario CHID, e.g. ``Case_A_...``)
 * ``<CHID>_steel_temperature_locations.csv`` - steel temperatures, all locations
 * ``<CHID>_steel_fire_results.xlsx``         - workbook (summary/locations/peaks/config)
 * ``<CHID>_member_plots/*.png``              - one temperature plot per member
-* ``<CHID>_failure_map_tcrit.png`` / ``_cre.png`` - failure-location maps
-  (only with ``--fds``; see below)
+* ``<CHID>_failure_map_tcrit_<view>.png`` / ``_cre_<view>.png`` - failure-
+  location maps, one file per view, plus ``_tcrit_heatmap.png``,
+  ``_tcrit_contourf.png`` and ``_tcrit_contour.png`` (plan heat map and
+  contours); only with ``--fds``, see below
 
 The CHID is taken from ``--chid`` / the config, or derived from the input
 filename (``<CHID>_devc.csv``), so several scenarios can be post-processed in
@@ -55,10 +57,21 @@ Failure-location maps
 ---------------------
 Given the FDS input file (``--fds model.fds``), the &DEVC lines - including
 those in &CATF include files - are matched to the AST devices, and each member
-location is placed at the centroid of its face devices. Two maps are written
-(plan, two elevations and an isometric view; views that collapse to a line,
-e.g. the plan of a planar truss, are left out): the time to reach the critical
-temperature, and the CRE equivalent time. Times are rounded down to whole
+location is placed at the centroid of its face devices. Two maps are written -
+the time to reach the critical temperature (``_tcrit``) and the CRE equivalent
+time (``_cre``) - each as separate plan, elevation and isometric files
+(``_plan``, ``_elevation_xz``, ``_elevation_yz``, ``_isometric``). The plan and
+elevations are drawn to true scale with axes covering only the data range; a
+view that collapses to a line (e.g. the plan of a planar truss) is skipped.
+In plan, the failure time is also shown as a heat map (``_tcrit_heatmap``),
+filled contours (``_tcrit_contourf``) and labelled isochrones
+(``_tcrit_contour``). All three use one field: each location takes the
+earliest failure of any steel within the plan resolution (the spacing of
+locations along the members), so stacked chords and diagonals collapse to the
+governing one; square cells of ``--heatmap-cell`` metres (default 0.5) take
+the earliest of their locations; empty cells are interpolated linearly
+between them; and locations that never fail count as the end of the
+simulation. Times are rounded down to whole
 minutes and grouped into classes starting at the first failure, either every
 ``--failure-interval`` minutes or automatically into about
 ``--failure-classes`` (default 4) classes of a readable width. The CRE map
@@ -74,14 +87,19 @@ import argparse
 import json
 import re
 import sys
+import textwrap
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import matplotlib
 
 matplotlib.use("Agg")  # headless: no display required
+import matplotlib.patches
+import matplotlib.patheffects
 import matplotlib.pyplot as plt
 import matplotlib.ticker
+import matplotlib.tri
 import numpy as np
 import pandas as pd
 
@@ -109,6 +127,9 @@ FDS_INPUT = None
 # None - in a readable step chosen to give about FAILURE_CLASSES classes.
 FAILURE_INTERVAL = None
 FAILURE_CLASSES = 4
+
+# Cell size (m) of the plan heat map and contours of failure time.
+HEATMAP_CELL = 0.5
 
 INITIAL_STEEL_TEMP = 20.0  # deg C
 
@@ -190,7 +211,8 @@ DEFAULT_PROTECTION = {
 LOCATION_OUTPUT = "steel_temperature_locations.csv"
 EXCEL_OUTPUT = "steel_fire_results.xlsx"
 PLOT_DIR = Path("member_plots")
-# Stem of the failure maps; "_tcrit.png" and "_cre.png" are appended.
+# Stem of the failure maps; "_tcrit_<view>.png" and "_cre_<view>.png" are
+# appended (views: plan, elevation_xz, elevation_yz, isometric).
 FAILURE_MAP_OUTPUT = "failure_map"
 
 
@@ -816,6 +838,7 @@ _INK = "#0b0b0b"
 _INK_2 = "#52514e"
 _MUTED = "#c3c2b7"
 _MEMBER_LINE = "#dcdbd5"
+_MEMBER_LINE_DARK = "#b9b8b2"   # members on a plain background (contour lines)
 
 
 def _class_styles(n):
@@ -831,14 +854,80 @@ def _class_styles(n):
     return list(zip(colours, markers))
 
 
-def plot_failure_map(path, points, classes, *, title, early_is_severe,
+# View layout (inches): axes are sized so both axes share one scale (true
+# proportions) and the limits cover only the data range plus a pad that keeps
+# edge markers whole.
+_MAX_AXES_W = 12.0
+_MAX_AXES_H = 9.0
+_MARKER_PAD_IN = 0.14
+_VIEWS_2D = [("plan", "x", "y", "Plan (x–y)"),
+             ("elevation_xz", "x", "z", "Elevation (x–z)"),
+             ("elevation_yz", "y", "z", "Elevation (y–z)")]
+
+
+def _row_major(items, ncol):
+    """Reorder *items* so a column-filling legend reads row by row."""
+    nrow = int(np.ceil(len(items) / ncol))
+    grid = [items[r * ncol:(r + 1) * ncol] for r in range(nrow)]
+    return [row[c] for c in range(ncol) for row in grid if c < len(row)]
+
+
+def _save_trimmed(fig, path, top_in, bottom_in, pad_in=0.2):
+    """Save *fig*, dropping empty rows between the title and legend bands.
+
+    A 3D box never fills its axes, so the blank margin above and below it is
+    removed from the rendered image (the title and legend bands are kept).
+    """
+    from PIL import Image  # bundled with matplotlib
+
+    dpi = fig.dpi
+    fig.canvas.draw()
+    img = np.asarray(fig.canvas.buffer_rgba())[..., :3]
+    top = int(round(top_in * dpi))
+    bottom = img.shape[0] - int(round(bottom_in * dpi))
+    band = img[top:bottom]
+    background = np.array(matplotlib.colors.to_rgb(_SURFACE)) * 255
+    used = np.where((np.abs(band.astype(int) - background).max(axis=2) > 8).any(axis=1))[0]
+    if used.size:
+        pad = int(round(pad_in * dpi))
+        band = band[max(0, used[0] - pad):min(len(band), used[-1] + 1 + pad)]
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.concatenate([img[:top], band, img[bottom:]])).save(
+        path, dpi=(dpi, dpi))
+
+
+def _legend_layout(labels, fig_w):
+    """Columns and height (inches) of a legend wrapped to the figure width."""
+    entry_w = max(len(s) for s in labels) * 0.075 + 0.55
+    ncol = max(1, min(len(labels), int((fig_w - 0.4) // entry_w)))
+    return ncol, 0.28 * int(np.ceil(len(labels) / ncol)) + 0.15
+
+
+def _title_and_legend(fig, fig_w, fig_h, heading, subtitle, handles, labels,
+                      legend_top_in):
+    """Title block at the top and a row-major legend below the axes."""
+    fig.text(0.35 / fig_w, 1 - 0.2 / fig_h, heading,
+             color=_INK, fontsize=13, ha="left", va="top")
+    fig.text(0.35 / fig_w, 1 - 0.55 / fig_h, subtitle, color=_INK_2,
+             fontsize=9, ha="left", va="top")
+    ncol, _ = _legend_layout(labels, fig_w)
+    fig.legend(_row_major(handles, ncol), _row_major(labels, ncol),
+               loc="upper center", bbox_to_anchor=(0.5, legend_top_in / fig_h),
+               ncol=ncol, frameon=False, fontsize=9, labelcolor=_INK)
+
+
+def plot_failure_map(stem, points, classes, *, title, early_is_severe,
                      highlight, highlight_label, unassigned_label):
-    """Write a plan / two elevations / isometric map of classified locations.
+    """Write one PNG per view (plan, elevations, isometric); return the paths.
 
     *points* has columns key, member, location, x, y, z. *classes* is the
     result of :func:`failure_classes`. When *early_is_severe* the earliest
     class is drawn darkest (failure time); otherwise the latest (CRE).
     *highlight* is a list of keys ringed and listed as *highlight_label*.
+    Files are named ``<stem>_plan.png``, ``<stem>_elevation_xz.png``,
+    ``<stem>_elevation_yz.png`` and ``<stem>_isometric.png``; a view that
+    collapses to a line (an axis spanning < 2 % of the model, e.g. the plan
+    of a planar truss) is skipped.
     """
     starts = classes["starts"]
     step = classes["step"]
@@ -852,34 +941,12 @@ def plot_failure_map(path, points, classes, *, title, early_is_severe,
     pts = points.copy()
     pts["cls"] = pts["key"].map(classes["assign"])
     unassigned = pts[pts["cls"].isna()]
+    ring = pts[pts["key"].isin(highlight)]
 
-    # Drop views that collapse to a line: an axis spanning < 2 % of the model
-    # (e.g. y for a planar truss). A planar model gets one large elevation.
-    spans = {c: float(np.ptp(pts[c].to_numpy())) for c in ("x", "y", "z")}
+    lo = {c: float(pts[c].min()) for c in ("x", "y", "z")}
+    spans = {c: float(pts[c].max()) - lo[c] for c in ("x", "y", "z")}
     biggest = max(spans.values()) or 1.0
     flat = {c for c, v in spans.items() if v < 0.02 * biggest}
-    candidates = [("x", "y", "Plan (x–y)"),
-                  ("x", "z", "Elevation (x–z)"),
-                  ("y", "z", "Elevation (y–z)")]
-    planes = [v for v in candidates if v[0] not in flat and v[1] not in flat]
-    if not planes:  # all points on a line: use the two widest axes
-        a, b = sorted(sorted(spans, key=spans.get)[-2:])
-        planes = [next(v for v in candidates if v[:2] == (a, b))]
-    show_iso = not flat
-    n_views = len(planes) + int(show_iso)
-    rows, cols = (1, n_views) if n_views <= 2 else (2, 2)
-    if n_views == 1:
-        # Size a single view to the model's proportions (within limits).
-        a, b = planes[0][:2]
-        ratio = spans[b] / max(spans[a], 1e-9)
-        height = float(np.clip(13.5 * ratio, 3.0, 9.0)) + 2.2
-    else:
-        height = 7.0 if rows == 1 else 11.0
-    fig = plt.figure(figsize=(15, height), facecolor=_SURFACE)
-    views = [(fig.add_subplot(rows, cols, i + 1), a, b, label)
-             for i, (a, b, label) in enumerate(planes)]
-    ax3d = (fig.add_subplot(rows, cols, n_views, projection="3d")
-            if show_iso else None)
 
     def draw(ax, cols):
         # Members as faint lines through their locations, in location order.
@@ -894,40 +961,14 @@ def plot_failure_map(path, points, classes, *, title, early_is_severe,
             colour, marker = style_of[start]
             ax.scatter(*(sel[c] for c in cols), s=42, color=colour, marker=marker,
                        edgecolors=_SURFACE, linewidths=0.8, zorder=z)
-        ring = pts[pts["key"].isin(highlight)]
+        # Rings keep full contrast in 3D (no depth shading), like the legend.
+        no_fade = {"depthshade": False} if len(cols) == 3 else {}
         ax.scatter(*(ring[c] for c in cols), s=170, facecolors="none",
-                   edgecolors=_INK, linewidths=1.4, zorder=len(starts) + 4)
+                   edgecolors=_INK, linewidths=1.4, zorder=len(starts) + 4, **no_fade)
 
-    for ax, a, b, label in views:
-        draw(ax, (a, b))
-        ax.set_aspect("equal", adjustable="datalim")
-        ax.set_title(label, color=_INK, fontsize=11, loc="left")
-        ax.set_xlabel(f"{a} (m)", color=_INK_2)
-        ax.set_ylabel(f"{b} (m)", color=_INK_2)
-        ax.grid(True, color="#e6e5e0", lw=0.6)
-        ax.set_facecolor(_SURFACE)
-        ax.tick_params(colors=_INK_2, labelsize=8)
-        for spine in ax.spines.values():
-            spine.set_color("#d4d3cd")
-
-    if ax3d is not None:
-        draw(ax3d, ("x", "y", "z"))
-        # Keep thin directions at least a quarter of the longest so the view
-        # stays readable (the 2D panels carry the true proportions).
-        ax3d.set_box_aspect([max(spans[c], 0.25 * biggest) for c in ("x", "y", "z")])
-        for axis in (ax3d.xaxis, ax3d.yaxis, ax3d.zaxis):
-            axis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
-        ax3d.view_init(elev=25, azim=-60)
-        ax3d.set_title("Isometric", color=_INK, fontsize=11, loc="left")
-        ax3d.set_facecolor(_SURFACE)
-        for axis_name in ("x", "y", "z"):
-            getattr(ax3d, f"set_{axis_name}label")(f"{axis_name} (m)", color=_INK_2)
-        ax3d.tick_params(colors=_INK_2, labelsize=7)
-
-    # Legend: classes from most to least severe, then the neutral entries.
+    # Legend entries: classes from most to least severe, then neutral entries.
     handles, labels = [], []
-    legend_order = starts if early_is_severe else starts[::-1]
-    for start in legend_order:
+    for start in (starts if early_is_severe else starts[::-1]):
         colour, marker = style_of[start]
         n = int((pts["cls"] == start).sum())
         handles.append(plt.Line2D([], [], ls="", marker=marker, ms=8, color=colour,
@@ -941,22 +982,322 @@ def plot_failure_map(path, points, classes, *, title, early_is_severe,
     labels.append(highlight_label)
     handles.append(plt.Line2D([], [], color=_MEMBER_LINE, lw=1.5))
     labels.append("Member")
-    # One row keeps the classes in reading order (legend columns fill downwards).
-    ncol = len(labels) if len(labels) <= 8 else int(np.ceil(len(labels) / 2))
-    fig.legend(handles, labels, loc="lower center", ncol=ncol,
-               frameon=False, fontsize=9, labelcolor=_INK)
+    subtitle = (f"Times rounded down to whole minutes; classes of {step} min "
+                f"starting at {classes['t0']} min.")
 
-    # Title block at fixed distances (inches) from the top of the figure.
-    fig.suptitle(title, color=_INK, fontsize=13, x=0.02, y=1 - 0.2 / height,
-                 ha="left", va="top")
-    fig.text(0.02, 1 - 0.55 / height,
-             f"Times rounded down to whole minutes; classes of {step} min "
-             f"starting at {classes['t0']} min.",
-             color=_INK_2, fontsize=9, ha="left", va="top")
-    fig.tight_layout(rect=(0, 0.55 / height, 1, 1 - 0.8 / height))
+    def finish(fig, fig_w, fig_h, view_label, legend_top_in):
+        _title_and_legend(fig, fig_w, fig_h, f"{title} – {view_label}",
+                          subtitle, handles, labels, legend_top_in)
+
+    written = []
+    for suffix, a, b, view_label in _VIEWS_2D:
+        if a in flat or b in flat:
+            continue
+        # One scale (in/m) for both axes, limits = data range + marker pad.
+        scale = min((_MAX_AXES_W - 2 * _MARKER_PAD_IN) / max(spans[a], 1e-9),
+                    (_MAX_AXES_H - 2 * _MARKER_PAD_IN) / max(spans[b], 1e-9))
+        ax_w = spans[a] * scale + 2 * _MARKER_PAD_IN
+        ax_h = spans[b] * scale + 2 * _MARKER_PAD_IN
+        pad_a = pad_b = _MARKER_PAD_IN / scale
+
+        fig_w = max(ax_w + 1.3, 8.0)
+        _, legend_h = _legend_layout(labels, fig_w)
+        top, xlab = 0.95, 0.6
+        fig_h = top + ax_h + xlab + legend_h
+        fig = plt.figure(figsize=(fig_w, fig_h), facecolor=_SURFACE)
+        left = max(0.9, (fig_w - ax_w) / 2)
+        ax = fig.add_axes([left / fig_w, (xlab + legend_h) / fig_h,
+                           ax_w / fig_w, ax_h / fig_h])
+        draw(ax, (a, b))
+        ax.set_xlim(lo[a] - pad_a, lo[a] + spans[a] + pad_a)
+        ax.set_ylim(lo[b] - pad_b, lo[b] + spans[b] + pad_b)
+        ax.set_xlabel(f"{a} (m)", color=_INK_2)
+        ax.set_ylabel(f"{b} (m)", color=_INK_2)
+        ax.grid(True, color="#e6e5e0", lw=0.6)
+        ax.set_facecolor(_SURFACE)
+        ax.tick_params(colors=_INK_2, labelsize=8)
+        ax.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(
+            nbins=max(2, int(ax_h / 0.45)), steps=[1, 2, 2.5, 5, 10]))
+        for spine in ax.spines.values():
+            spine.set_color("#d4d3cd")
+        finish(fig, fig_w, fig_h, view_label, legend_h)
+
+        path = f"{stem}_{suffix}.png"
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=200, facecolor=_SURFACE)
+        plt.close(fig)
+        written.append(path)
+
+    if not flat:
+        fig_w, fig_h = 11.0, 9.0
+        fig = plt.figure(figsize=(fig_w, fig_h), dpi=200, facecolor=_SURFACE)
+        _, legend_h = _legend_layout(labels, fig_w)
+        top_band, bottom_band = 0.9, legend_h + 0.1
+        ax3d = fig.add_axes([0.02, bottom_band / fig_h, 0.96,
+                             1 - (top_band + bottom_band) / fig_h], projection="3d")
+        draw(ax3d, ("x", "y", "z"))
+        for c in ("x", "y", "z"):
+            getattr(ax3d, f"set_{c}lim")(lo[c], lo[c] + spans[c])
+            getattr(ax3d, f"set_{c}label")(f"{c} (m)", color=_INK_2)
+        # Keep thin directions at least a quarter of the longest so the view
+        # stays readable (the plan and elevations carry the true proportions).
+        ax3d.set_box_aspect([max(spans[c], 0.25 * biggest) for c in ("x", "y", "z")],
+                           zoom=1.15)
+        for axis in (ax3d.xaxis, ax3d.yaxis, ax3d.zaxis):
+            axis.set_major_locator(matplotlib.ticker.MaxNLocator(4))
+        ax3d.view_init(elev=25, azim=-60)
+        ax3d.set_facecolor(_SURFACE)
+        ax3d.tick_params(colors=_INK_2, labelsize=7)
+        finish(fig, fig_w, fig_h, "Isometric", legend_h)
+        path = f"{stem}_isometric.png"
+        _save_trimmed(fig, path, top_band, bottom_band)
+        plt.close(fig)
+        written.append(path)
+
+    return written
+
+
+def plan_resolution(map_df):
+    """Typical spacing (m) between neighbouring locations along a member."""
+    gaps = []
+    for _, grp in map_df.groupby("Member"):
+        xyz = grp.sort_values("Location")[["X (m)", "Y (m)", "Z (m)"]].to_numpy(float)
+        if len(xyz) > 1:
+            gaps.extend(np.linalg.norm(np.diff(xyz, axis=0), axis=1))
+    return float(np.median(gaps)) if gaps else 0.0
+
+
+def plan_envelope(x, y, values, h):
+    """Earliest value of any location within plan distance *h* of each location.
+
+    Chords and diagonals stacked above one another interleave in plan; taking
+    the governing (earliest) value within the plan resolution keeps the field
+    from zig-zagging between them, whatever the cell size.
+    """
+    if h <= 0:
+        return values.copy()
+    out = np.empty_like(values)
+    for s in range(0, len(x), 2000):                     # chunked to bound memory
+        d2 = (x[s:s + 2000, None] - x) ** 2 + (y[s:s + 2000, None] - y) ** 2
+        out[s:s + 2000] = np.where(d2 <= (h * 1.001) ** 2, values, np.inf).min(axis=1)
+    return out
+
+
+def plan_failure_field(map_df, classes, *, t_end_min, cell):
+    """Failure-time field in plan, shared by the heat map and contour plots.
+
+    Each location first takes the earliest failure of any steel within the plan
+    resolution (the spacing of locations along the members), so stacked chords
+    and diagonals collapse to the governing one; a location that never fails
+    counts as the end of the simulation, *t_end_min*. Each square cell (side
+    *cell* m) containing steel then takes the earliest of its locations. Empty cells are interpolated linearly between the
+    cells with steel (Delaunay triangulation of their centres), without
+    extrapolation. Returns None when the plan collapses to a line (e.g. a
+    single planar truss), else a namespace with the cell grid (xe, ye), the
+    triangulation (tri, or None if too few cells) and its values (tri_values),
+    the rounded-down field and its class index per cell, and the classes.
+    """
+    x = map_df["X (m)"].to_numpy(float)
+    y = map_df["Y (m)"].to_numpy(float)
+    minutes = map_df["Failure Time (min)"].to_numpy(float)   # NaN = not reached
+    span_x, span_y = float(np.ptp(x)), float(np.ptp(y))
+    if min(span_x, span_y) < 0.02 * max(span_x, span_y, 1e-9):
+        return None
+
+    # Classes from the first failure to the simulation end (last one may be
+    # partial). The field spans more time than the failures themselves, so an
+    # automatic class width is widened to the next readable step until at most
+    # max(FAILURE_CLASSES, 5) classes remain (five is the most the colour ramp
+    # separates); an explicit FAILURE_INTERVAL is always honoured.
+    t0, step = classes["t0"], classes["step"]
+    last_minute = int(np.ceil(t_end_min)) - 1
+    if not FAILURE_INTERVAL:
+        cap = max(int(FAILURE_CLASSES), 5)
+        while (last_minute - t0) // step + 1 > cap:
+            larger = [s_ for s_ in READABLE_STEPS_MIN if s_ > step]
+            step = larger[0] if larger else step + 60
+    edges = [float(t0 + k * step) for k in range(int(np.ceil((t_end_min - t0) / step)))]
+    edges = [e for e in edges if e < t_end_min] + [float(t_end_min)]
+    n_cls = len(edges) - 1
+    labels = [class_label(int(a), step) if b - a == step else
+              (f"{int(a)} min" if last_minute <= a else f"{int(a)}–{last_minute} min")
+              for a, b in zip(edges[:-1], edges[1:])]
+
+    # Earliest failure per cell (not reached -> simulation end).
+    nx = max(1, int(np.ceil(span_x / cell)))
+    ny = max(1, int(np.ceil(span_y / cell)))
+    xe = x.min() + cell * np.arange(nx + 1)
+    ye = y.min() + cell * np.arange(ny + 1)
+    ix = np.clip(((x - x.min()) // cell).astype(int), 0, nx - 1)
+    iy = np.clip(((y - y.min()) // cell).astype(int), 0, ny - 1)
+    resolution = plan_resolution(map_df)
+    governing = plan_envelope(x, y, np.where(np.isnan(minutes), t_end_min, minutes),
+                              resolution)
+    measured = np.full((ny, nx), np.inf)
+    np.minimum.at(measured, (iy, ix), governing)
+    has = np.isfinite(measured)
+    measured[~has] = np.nan
+    # Centroid of each cell's locations: the contours are triangulated there,
+    # so they reach the members themselves rather than stopping at cell centres.
+    sums = np.zeros((3, ny, nx))
+    for k, v in enumerate((x, y, np.ones_like(x))):
+        np.add.at(sums[k], (iy, ix), v)
+    px_c, py_c = sums[0][has] / sums[2][has], sums[1][has] / sums[2][has]
+    try:
+        contour_tri = matplotlib.tri.Triangulation(px_c, py_c)
+    except (RuntimeError, ValueError):
+        contour_tri = None
+
+    # Linear interpolation between the cells with steel.
+    xc, yc = np.meshgrid((xe[:-1] + xe[1:]) / 2, (ye[:-1] + ye[1:]) / 2)
+    field = measured.copy()
+    tri = None
+    try:
+        tri = matplotlib.tri.Triangulation(xc[has], yc[has])
+        interp = matplotlib.tri.LinearTriInterpolator(tri, measured[has])
+        field = np.ma.filled(interp(xc, yc), np.nan)
+        field[has] = measured[has]
+    except (RuntimeError, ValueError):
+        tri = None
+        print("  Too few non-collinear cells to interpolate - the plan heat map "
+              "shows cells with steel only, and no contours are drawn.")
+    # Round down to whole minutes. The tolerance keeps an interpolated
+    # 59.99999 (roundoff between values of 60) out of the class below; the
+    # contours use the same shifted values, so all plots agree.
+    field = np.floor(field + 1e-6)
+    cls_idx = np.searchsorted(edges, field, side="right") - 1.0
+    cls_idx = np.where(np.isnan(field), np.nan, np.clip(cls_idx, 0, n_cls))
+
+    return types.SimpleNamespace(
+        xe=xe, ye=ye, cell=cell, resolution=resolution, tri=contour_tri,
+        tri_values=measured[has] + 1e-6,
+        field=field, cls_idx=cls_idx, t0=t0, step=step, edges=edges,
+        labels=labels, n_cls=n_cls, t_end_min=t_end_min,
+        colours=[c for c, _ in _class_styles(n_cls)][::-1] + [_MUTED])
+
+
+def _plan_figure(field, map_df, *, heading, subtitle, handles, labels,
+                 member_colour, extent=None):
+    """True-scale plan figure; returns (fig, ax).
+
+    The axes cover *extent* (x0, x1, y0, y1), by default the field's cell grid.
+    Members and first-failure rings are drawn above the data (zorder 2-3), so
+    the caller adds the field itself at zorder 1.
+    """
+    x0, x1, y0, y1 = extent or (field.xe[0], field.xe[-1], field.ye[0], field.ye[-1])
+    gx, gy = x1 - x0, y1 - y0
+    scale = min(_MAX_AXES_W / gx, _MAX_AXES_H / gy)
+    ax_w, ax_h = gx * scale, gy * scale
+    fig_w = max(ax_w + 1.3, 8.0)
+    _, legend_h = _legend_layout(labels, fig_w)
+    # Wrap a long subtitle to the figure width (about 0.068 in per character
+    # at 9 pt) and make room for the extra lines.
+    lines = textwrap.wrap(subtitle, width=max(40, int((fig_w - 0.6) / 0.068)))
+    subtitle = "\n".join(lines)
+    top, xlab = 0.95 + 0.16 * (len(lines) - 1), 0.6
+    fig_h = top + ax_h + xlab + legend_h
+    fig = plt.figure(figsize=(fig_w, fig_h), facecolor=_SURFACE)
+    left = max(0.9, (fig_w - ax_w) / 2)
+    ax = fig.add_axes([left / fig_w, (xlab + legend_h) / fig_h, ax_w / fig_w, ax_h / fig_h])
+    for _, grp in map_df.groupby("Member"):
+        grp = grp.sort_values("Location")
+        ax.plot(grp["X (m)"], grp["Y (m)"], color=member_colour, lw=1.0, zorder=2)
+    first = map_df[map_df["Failure Time (min)"] == field.t0]
+    ax.scatter(first["X (m)"], first["Y (m)"], s=170, facecolors="none",
+               edgecolors=_INK, linewidths=1.4, zorder=3, clip_on=False)
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+    ax.set_xlabel("x (m)", color=_INK_2)
+    ax.set_ylabel("y (m)", color=_INK_2)
+    ax.set_facecolor(_SURFACE)
+    ax.tick_params(colors=_INK_2, labelsize=8)
+    for spine in ax.spines.values():
+        spine.set_color("#d4d3cd")
+    _title_and_legend(fig, fig_w, fig_h, heading, subtitle, handles, labels, legend_h)
+    return fig, ax
+
+
+def _class_legend(field):
+    """Legend entries for the filled plots: classes, not reached, members, rings."""
+    handles = [matplotlib.patches.Patch(color=c) for c in field.colours]
+    labels = list(field.labels) + [f"Not reached in {field.t_end_min:g} min"]
+    outline = [matplotlib.patheffects.withStroke(linewidth=3, foreground=_MUTED)]
+    handles.append(plt.Line2D([], [], color="white", lw=1.5, path_effects=outline))
+    labels.append("Member (plan)")
+    handles.append(plt.Line2D([], [], ls="", marker="o", ms=11, mfc="none",
+                              mec=_INK, mew=1.4))
+    labels.append(f"First failure ({field.t0} min)")
+    return handles, labels
+
+
+def _save(fig, path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=200, facecolor=_SURFACE)
     plt.close(fig)
+    return path
+
+
+def plot_failure_heatmap(path, map_df, field, *, title):
+    """Plan heat map: each cell coloured by its (interpolated) failure class."""
+    handles, labels = _class_legend(field)
+    fig, ax = _plan_figure(
+        field, map_df, heading=f"{title} – Heat map (plan)",
+        subtitle=(f"Earliest failure within {field.resolution:g} m in plan, per "
+                  f"{field.cell:g} m cell; linear between cells; rounded down to whole "
+                  f"minutes; classes of {field.step} min."),
+        handles=handles, labels=labels, member_colour="white")
+    cmap = matplotlib.colors.ListedColormap(field.colours)
+    norm = matplotlib.colors.BoundaryNorm(np.arange(-0.5, field.n_cls + 1.5), cmap.N)
+    ax.pcolormesh(field.xe, field.ye, np.ma.masked_invalid(field.cls_idx),
+                  cmap=cmap, norm=norm, zorder=1)
+    return _save(fig, path)
+
+
+def plot_failure_contours(stem, map_df, field, *, title):
+    """Filled contours and labelled isochrones of the failure-time field.
+
+    Both are drawn on the triangulation of the cells with steel (the field
+    the heat map interpolates), at the class boundaries. Contouring the
+    continuous field at whole minutes equals classing the rounded-down times,
+    since floor(t) >= n exactly when t >= n. Returns the written paths.
+    """
+    if field.tri is None:
+        return []
+    written = []
+    vals = field.tri_values
+    top = max(float(vals.max()), field.edges[-1]) + 1.0
+    # The contoured field spans the triangulated cell centroids: fit the axes.
+    tri = field.tri
+    extent = (tri.x.min(), tri.x.max(), tri.y.min(), tri.y.max())
+
+    handles, labels = _class_legend(field)
+    fig, ax = _plan_figure(
+        field, map_df, heading=f"{title} – Filled contours (plan)",
+        subtitle=(f"Bands of the earliest failure within {field.resolution:g} m in plan, "
+                  f"linear between {field.cell:g} m cells; rounded down to whole minutes; "
+                  f"classes of {field.step} min."),
+        handles=handles, labels=labels, member_colour="white", extent=extent)
+    ax.tricontourf(field.tri, vals, levels=field.edges + [top],
+                   colors=field.colours, zorder=1)
+    written.append(_save(fig, f"{stem}_contourf.png"))
+
+    handles = [plt.Line2D([], [], color=_INK, lw=1.0),
+               plt.Line2D([], [], color=_MEMBER_LINE_DARK, lw=1.5),
+               plt.Line2D([], [], ls="", marker="o", ms=11, mfc="none", mec=_INK, mew=1.4)]
+    labels = [f"Isochrone (labelled; {field.t_end_min:g} min = not reached)",
+              "Member (plan)", f"First failure ({field.t0} min)"]
+    fig, ax = _plan_figure(
+        field, map_df, heading=f"{title} – Contours (plan)",
+        subtitle=(f"Isochrones every {field.step} min of the earliest failure within "
+                  f"{field.resolution:g} m in plan, linear between {field.cell:g} m cells; "
+                  "rounded down to whole minutes."),
+        handles=handles, labels=labels, member_colour=_MEMBER_LINE_DARK,
+        extent=extent)
+    lines = ax.tricontour(field.tri, vals, levels=field.edges[1:], colors=_INK,
+                          linewidths=0.9, zorder=2.5)
+    ax.clabel(lines, fmt=lambda v: f"{int(round(v))} min", fontsize=8, inline=True)
+    written.append(_save(fig, f"{stem}_contour.png"))
+    return written
 
 
 # ============================================================
@@ -1062,6 +1403,8 @@ def apply_config(cfg):
         g["FAILURE_INTERVAL"] = fm["interval_min"]
     if "n_classes" in fm:
         g["FAILURE_CLASSES"] = fm["n_classes"]
+    if "heatmap_cell" in fm:
+        g["HEATMAP_CELL"] = float(fm["heatmap_cell"])
 
     for key, name in _OUTPUT_KEYS.items():
         if key in cfg.get("output", {}):
@@ -1104,6 +1447,10 @@ def parse_args(argv=None):
         "--failure-classes", metavar="N", type=int,
         help="Target number of failure-time classes when the interval is "
              "automatic (default 4).")
+    parser.add_argument(
+        "--heatmap-cell", metavar="M", type=float,
+        help="Cell size of the plan heat map and contours in metres "
+             "(default 0.5).")
     return parser.parse_args(argv)
 
 
@@ -1197,8 +1544,12 @@ def classify_location_map(map_df):
     return result
 
 
-def write_failure_maps(map_df, classes, chid):
-    """Plot the failure-time and CRE maps; print a short class summary."""
+def write_failure_maps(map_df, classes, chid, t_end_s):
+    """Plot the failure-time and CRE maps; print a short class summary.
+
+    *t_end_s* is the simulation end time; the plan heat map treats locations
+    that never fail as failing then.
+    """
     points = pd.DataFrame({
         "key": map_df["Location"],
         "member": map_df["Member"],
@@ -1215,14 +1566,21 @@ def write_failure_maps(map_df, classes, chid):
               "no failure-time map.")
     else:
         first = map_df.loc[map_df["Failure Time (min)"] == tc["t0"], "Location"].tolist()
-        path = f"{stem}_tcrit.png"
-        plot_failure_map(
-            path, points, tc,
+        written += plot_failure_map(
+            f"{stem}_tcrit", points, tc,
             title=f"{chid}: time to reach the critical steel temperature",
             early_is_severe=True, highlight=first,
             highlight_label=f"First failure ({tc['t0']} min)",
             unassigned_label="Not reached / no criterion")
-        written.append(path)
+        field = plan_failure_field(map_df, tc, t_end_min=t_end_s / 60.0,
+                                   cell=HEATMAP_CELL)
+        if field is None:
+            print("  Plan collapses to a line - no plan heat map or contours.")
+        else:
+            title = f"{chid}: time to reach the critical steel temperature"
+            written.append(plot_failure_heatmap(
+                f"{stem}_tcrit_heatmap.png", map_df, field, title=title))
+            written += plot_failure_contours(f"{stem}_tcrit", map_df, field, title=title)
         extra = f" (+{len(first) - 1} more)" if len(first) > 1 else ""
         print(f"  First failure: {tc['t0']} min at {first[0]}{extra}")
         counts = map_df["Failure Class"].value_counts()
@@ -1236,14 +1594,12 @@ def write_failure_maps(map_df, classes, chid):
     if cre is not None:
         top = int(map_df["CRE Equivalent Time (min)"].max())
         worst = map_df.loc[map_df["CRE Equivalent Time (min)"] == top, "Location"].tolist()
-        path = f"{stem}_cre.png"
-        plot_failure_map(
-            path, points, cre,
+        written += plot_failure_map(
+            f"{stem}_cre", points, cre,
             title=f"{chid}: CRE equivalent time of fire exposure",
             early_is_severe=False, highlight=worst,
             highlight_label=f"Most severe exposure ({top} min)",
             unassigned_label="Beyond CRE search cap")
-        written.append(path)
         print(f"  CRE equivalent time: {cre['t0']}–{top} min "
               f"(classes of {cre['step']} min)")
     for path in written:
@@ -1269,6 +1625,10 @@ def main(argv=None):
         globals()["FAILURE_INTERVAL"] = args.failure_interval
     if args.failure_classes is not None:
         globals()["FAILURE_CLASSES"] = args.failure_classes
+    if args.heatmap_cell is not None:
+        globals()["HEATMAP_CELL"] = args.heatmap_cell
+    if not HEATMAP_CELL > 0:
+        raise SystemExit(f"Heat-map cell size must be positive (got {HEATMAP_CELL}).")
     globals()["FAILURE_INTERVAL"] = _whole_number_setting(
         FAILURE_INTERVAL, "failure interval (min)")
     globals()["FAILURE_CLASSES"] = _whole_number_setting(
@@ -1428,7 +1788,7 @@ def main(argv=None):
     print("=" * 64)
 
     if map_df is not None and not map_df.empty:
-        write_failure_maps(map_df, map_classes, chid)
+        write_failure_maps(map_df, map_classes, chid, float(time[-1]))
 
 
 if __name__ == "__main__":
