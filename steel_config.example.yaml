@@ -52,7 +52,7 @@ failure_map:
 #   locations_csv: steel_temperature_locations.csv
 #   excel: steel_fire_results.xlsx
 #   plot_dir: member_plots
-#   failure_map: failure_map    # stem; _tcrit.png / _cre.png are appended
+#   failure_map: failure_map    # stem; _tcrit_<view>.png / _cre_<view>.png appended
 
 # --- fallback protection ---------------------------------------------------
 # Used when a member is flagged protected but supplies no "protection" block.
