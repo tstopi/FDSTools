@@ -17,8 +17,9 @@ Outputs (each prefixed with the scenario CHID, e.g. ``Case_A_...``)
 * ``<CHID>_steel_fire_results.xlsx``         - workbook (summary/locations/peaks/config)
 * ``<CHID>_member_plots/*.png``              - one temperature plot per member
 * ``<CHID>_failure_map_tcrit_<view>.png`` / ``_cre_<view>.png`` - failure-
-  location maps, one file per view, plus ``_tcrit_heatmap.png`` (plan heat
-  map); only with ``--fds``, see below
+  location maps, one file per view, plus ``_tcrit_heatmap.png``,
+  ``_tcrit_contourf.png`` and ``_tcrit_contour.png`` (plan heat map and
+  contours); only with ``--fds``, see below
 
 The CHID is taken from ``--chid`` / the config, or derived from the input
 filename (``<CHID>_devc.csv``), so several scenarios can be post-processed in
@@ -62,10 +63,15 @@ time (``_cre``) - each as separate plan, elevation and isometric files
 (``_plan``, ``_elevation_xz``, ``_elevation_yz``, ``_isometric``). The plan and
 elevations are drawn to true scale with axes covering only the data range; a
 view that collapses to a line (e.g. the plan of a planar truss) is skipped.
-A plan heat map of the failure time (``_tcrit_heatmap``) fills square cells of
-``--heatmap-cell`` metres (default 0.5): cells with steel take their earliest
-failure, empty cells are interpolated linearly between them, and locations
-that never fail count as the end of the simulation. Times are rounded down to whole
+In plan, the failure time is also shown as a heat map (``_tcrit_heatmap``),
+filled contours (``_tcrit_contourf``) and labelled isochrones
+(``_tcrit_contour``). All three use one field: each location takes the
+earliest failure of any steel within the plan resolution (the spacing of
+locations along the members), so stacked chords and diagonals collapse to the
+governing one; square cells of ``--heatmap-cell`` metres (default 0.5) take
+the earliest of their locations; empty cells are interpolated linearly
+between them; and locations that never fail count as the end of the
+simulation. Times are rounded down to whole
 minutes and grouped into classes starting at the first failure, either every
 ``--failure-interval`` minutes or automatically into about
 ``--failure-classes`` (default 4) classes of a readable width. The CRE map
@@ -81,6 +87,8 @@ import argparse
 import json
 import re
 import sys
+import textwrap
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -120,7 +128,7 @@ FDS_INPUT = None
 FAILURE_INTERVAL = None
 FAILURE_CLASSES = 4
 
-# Cell size (m) of the plan heat map of failure time.
+# Cell size (m) of the plan heat map and contours of failure time.
 HEATMAP_CELL = 0.5
 
 INITIAL_STEEL_TEMP = 20.0  # deg C
@@ -830,6 +838,7 @@ _INK = "#0b0b0b"
 _INK_2 = "#52514e"
 _MUTED = "#c3c2b7"
 _MEMBER_LINE = "#dcdbd5"
+_MEMBER_LINE_DARK = "#b9b8b2"   # members on a plain background (contour lines)
 
 
 def _class_styles(n):
@@ -1048,31 +1057,58 @@ def plot_failure_map(stem, points, classes, *, title, early_is_severe,
     return written
 
 
-def plot_failure_heatmap(path, map_df, classes, *, t_end_min, cell, title):
-    """Plan heat map of failure time on square cells; return *path* or None.
+def plan_resolution(map_df):
+    """Typical spacing (m) between neighbouring locations along a member."""
+    gaps = []
+    for _, grp in map_df.groupby("Member"):
+        xyz = grp.sort_values("Location")[["X (m)", "Y (m)", "Z (m)"]].to_numpy(float)
+        if len(xyz) > 1:
+            gaps.extend(np.linalg.norm(np.diff(xyz, axis=0), axis=1))
+    return float(np.median(gaps)) if gaps else 0.0
 
-    Each cell containing steel takes the earliest failure of its locations
-    (stacked chords and diagonals collapse to the governing one); a location
-    that never fails counts as the end of the simulation, *t_end_min*. Empty
-    cells are interpolated linearly between the cells with steel (Delaunay
-    triangulation of their centres), without extrapolation. Values are rounded
-    down to whole minutes and shown in the failure-time classes of *classes*,
-    extended up to the simulation end. Returns None when the plan collapses to
-    a line (e.g. a single planar truss).
+
+def plan_envelope(x, y, values, h):
+    """Earliest value of any location within plan distance *h* of each location.
+
+    Chords and diagonals stacked above one another interleave in plan; taking
+    the governing (earliest) value within the plan resolution keeps the field
+    from zig-zagging between them, whatever the cell size.
+    """
+    if h <= 0:
+        return values.copy()
+    out = np.empty_like(values)
+    for s in range(0, len(x), 2000):                     # chunked to bound memory
+        d2 = (x[s:s + 2000, None] - x) ** 2 + (y[s:s + 2000, None] - y) ** 2
+        out[s:s + 2000] = np.where(d2 <= (h * 1.001) ** 2, values, np.inf).min(axis=1)
+    return out
+
+
+def plan_failure_field(map_df, classes, *, t_end_min, cell):
+    """Failure-time field in plan, shared by the heat map and contour plots.
+
+    Each location first takes the earliest failure of any steel within the plan
+    resolution (the spacing of locations along the members), so stacked chords
+    and diagonals collapse to the governing one; a location that never fails
+    counts as the end of the simulation, *t_end_min*. Each square cell (side
+    *cell* m) containing steel then takes the earliest of its locations. Empty cells are interpolated linearly between the
+    cells with steel (Delaunay triangulation of their centres), without
+    extrapolation. Returns None when the plan collapses to a line (e.g. a
+    single planar truss), else a namespace with the cell grid (xe, ye), the
+    triangulation (tri, or None if too few cells) and its values (tri_values),
+    the rounded-down field and its class index per cell, and the classes.
     """
     x = map_df["X (m)"].to_numpy(float)
     y = map_df["Y (m)"].to_numpy(float)
     minutes = map_df["Failure Time (min)"].to_numpy(float)   # NaN = not reached
     span_x, span_y = float(np.ptp(x)), float(np.ptp(y))
     if min(span_x, span_y) < 0.02 * max(span_x, span_y, 1e-9):
-        print("  Plan collapses to a line - no heat map.")
         return None
 
     # Classes from the first failure to the simulation end (last one may be
-    # partial). The heat map spans more time than the failures themselves, so
-    # an automatic class width is widened to the next readable step until at
-    # most max(FAILURE_CLASSES, 5) classes remain (five is the most the colour
-    # ramp separates); an explicit FAILURE_INTERVAL is always honoured.
+    # partial). The field spans more time than the failures themselves, so an
+    # automatic class width is widened to the next readable step until at most
+    # max(FAILURE_CLASSES, 5) classes remain (five is the most the colour ramp
+    # separates); an explicit FAILURE_INTERVAL is always honoured.
     t0, step = classes["t0"], classes["step"]
     last_minute = int(np.ceil(t_end_min)) - 1
     if not FAILURE_INTERVAL:
@@ -1094,77 +1130,174 @@ def plot_failure_heatmap(path, map_df, classes, *, t_end_min, cell, title):
     ye = y.min() + cell * np.arange(ny + 1)
     ix = np.clip(((x - x.min()) // cell).astype(int), 0, nx - 1)
     iy = np.clip(((y - y.min()) // cell).astype(int), 0, ny - 1)
+    resolution = plan_resolution(map_df)
+    governing = plan_envelope(x, y, np.where(np.isnan(minutes), t_end_min, minutes),
+                              resolution)
     measured = np.full((ny, nx), np.inf)
-    np.minimum.at(measured, (iy, ix), np.where(np.isnan(minutes), t_end_min, minutes))
+    np.minimum.at(measured, (iy, ix), governing)
     has = np.isfinite(measured)
     measured[~has] = np.nan
+    # Centroid of each cell's locations: the contours are triangulated there,
+    # so they reach the members themselves rather than stopping at cell centres.
+    sums = np.zeros((3, ny, nx))
+    for k, v in enumerate((x, y, np.ones_like(x))):
+        np.add.at(sums[k], (iy, ix), v)
+    px_c, py_c = sums[0][has] / sums[2][has], sums[1][has] / sums[2][has]
+    try:
+        contour_tri = matplotlib.tri.Triangulation(px_c, py_c)
+    except (RuntimeError, ValueError):
+        contour_tri = None
 
     # Linear interpolation between the cells with steel.
     xc, yc = np.meshgrid((xe[:-1] + xe[1:]) / 2, (ye[:-1] + ye[1:]) / 2)
     field = measured.copy()
+    tri = None
     try:
         tri = matplotlib.tri.Triangulation(xc[has], yc[has])
         interp = matplotlib.tri.LinearTriInterpolator(tri, measured[has])
         field = np.ma.filled(interp(xc, yc), np.nan)
         field[has] = measured[has]
     except (RuntimeError, ValueError):
-        print("  Too few non-collinear cells to interpolate - heat map shows "
-              "cells with steel only.")
-    # Round down to whole minutes; the tolerance keeps an interpolated 59.99999
-    # (roundoff between values of 60) out of the class below.
+        tri = None
+        print("  Too few non-collinear cells to interpolate - the plan heat map "
+              "shows cells with steel only, and no contours are drawn.")
+    # Round down to whole minutes. The tolerance keeps an interpolated
+    # 59.99999 (roundoff between values of 60) out of the class below; the
+    # contours use the same shifted values, so all plots agree.
     field = np.floor(field + 1e-6)
     cls_idx = np.searchsorted(edges, field, side="right") - 1.0
     cls_idx = np.where(np.isnan(field), np.nan, np.clip(cls_idx, 0, n_cls))
 
-    colours = [c for c, _ in _class_styles(n_cls)][::-1] + [_MUTED]
-    cmap = matplotlib.colors.ListedColormap(colours)
-    norm = matplotlib.colors.BoundaryNorm(np.arange(-0.5, n_cls + 1.5), cmap.N)
+    return types.SimpleNamespace(
+        xe=xe, ye=ye, cell=cell, resolution=resolution, tri=contour_tri,
+        tri_values=measured[has] + 1e-6,
+        field=field, cls_idx=cls_idx, t0=t0, step=step, edges=edges,
+        labels=labels, n_cls=n_cls, t_end_min=t_end_min,
+        colours=[c for c, _ in _class_styles(n_cls)][::-1] + [_MUTED])
 
-    # Layout: true scale, axes covering the cell grid, figure sized to fit.
-    gx, gy = xe[-1] - xe[0], ye[-1] - ye[0]
+
+def _plan_figure(field, map_df, *, heading, subtitle, handles, labels,
+                 member_colour, extent=None):
+    """True-scale plan figure; returns (fig, ax).
+
+    The axes cover *extent* (x0, x1, y0, y1), by default the field's cell grid.
+    Members and first-failure rings are drawn above the data (zorder 2-3), so
+    the caller adds the field itself at zorder 1.
+    """
+    x0, x1, y0, y1 = extent or (field.xe[0], field.xe[-1], field.ye[0], field.ye[-1])
+    gx, gy = x1 - x0, y1 - y0
     scale = min(_MAX_AXES_W / gx, _MAX_AXES_H / gy)
     ax_w, ax_h = gx * scale, gy * scale
-    handles = [matplotlib.patches.Patch(color=c) for c in colours[:-1]]
-    labels_leg = list(labels)
-    handles.append(matplotlib.patches.Patch(color=_MUTED))
-    labels_leg.append(f"Not reached in {t_end_min:g} min")
-    outline = [matplotlib.patheffects.withStroke(linewidth=3, foreground=_MUTED)]
-    handles.append(plt.Line2D([], [], color="white", lw=1.5, path_effects=outline))
-    labels_leg.append("Member (plan)")
-    handles.append(plt.Line2D([], [], ls="", marker="o", ms=11, mfc="none",
-                              mec=_INK, mew=1.4))
-    labels_leg.append(f"First failure ({t0} min)")
     fig_w = max(ax_w + 1.3, 8.0)
-    _, legend_h = _legend_layout(labels_leg, fig_w)
-    top, xlab = 0.95, 0.6
+    _, legend_h = _legend_layout(labels, fig_w)
+    # Wrap a long subtitle to the figure width (about 0.068 in per character
+    # at 9 pt) and make room for the extra lines.
+    lines = textwrap.wrap(subtitle, width=max(40, int((fig_w - 0.6) / 0.068)))
+    subtitle = "\n".join(lines)
+    top, xlab = 0.95 + 0.16 * (len(lines) - 1), 0.6
     fig_h = top + ax_h + xlab + legend_h
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor=_SURFACE)
     left = max(0.9, (fig_w - ax_w) / 2)
     ax = fig.add_axes([left / fig_w, (xlab + legend_h) / fig_h, ax_w / fig_w, ax_h / fig_h])
-    ax.pcolormesh(xe, ye, np.ma.masked_invalid(cls_idx), cmap=cmap, norm=norm, zorder=1)
     for _, grp in map_df.groupby("Member"):
         grp = grp.sort_values("Location")
-        ax.plot(grp["X (m)"], grp["Y (m)"], color="white", lw=1.0, zorder=2)
-    first = map_df[map_df["Failure Time (min)"] == t0]
+        ax.plot(grp["X (m)"], grp["Y (m)"], color=member_colour, lw=1.0, zorder=2)
+    first = map_df[map_df["Failure Time (min)"] == field.t0]
     ax.scatter(first["X (m)"], first["Y (m)"], s=170, facecolors="none",
                edgecolors=_INK, linewidths=1.4, zorder=3, clip_on=False)
-    ax.set_xlim(xe[0], xe[-1])
-    ax.set_ylim(ye[0], ye[-1])
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
     ax.set_xlabel("x (m)", color=_INK_2)
     ax.set_ylabel("y (m)", color=_INK_2)
     ax.set_facecolor(_SURFACE)
     ax.tick_params(colors=_INK_2, labelsize=8)
     for spine in ax.spines.values():
         spine.set_color("#d4d3cd")
-    _title_and_legend(
-        fig, fig_w, fig_h, f"{title} – Heat map (plan)",
-        f"Earliest failure per {cell:g} m cell, linear between cells with steel; "
-        f"rounded down to whole minutes; classes of {step} min.",
-        handles, labels_leg, legend_h)
+    _title_and_legend(fig, fig_w, fig_h, heading, subtitle, handles, labels, legend_h)
+    return fig, ax
+
+
+def _class_legend(field):
+    """Legend entries for the filled plots: classes, not reached, members, rings."""
+    handles = [matplotlib.patches.Patch(color=c) for c in field.colours]
+    labels = list(field.labels) + [f"Not reached in {field.t_end_min:g} min"]
+    outline = [matplotlib.patheffects.withStroke(linewidth=3, foreground=_MUTED)]
+    handles.append(plt.Line2D([], [], color="white", lw=1.5, path_effects=outline))
+    labels.append("Member (plan)")
+    handles.append(plt.Line2D([], [], ls="", marker="o", ms=11, mfc="none",
+                              mec=_INK, mew=1.4))
+    labels.append(f"First failure ({field.t0} min)")
+    return handles, labels
+
+
+def _save(fig, path):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=200, facecolor=_SURFACE)
     plt.close(fig)
     return path
+
+
+def plot_failure_heatmap(path, map_df, field, *, title):
+    """Plan heat map: each cell coloured by its (interpolated) failure class."""
+    handles, labels = _class_legend(field)
+    fig, ax = _plan_figure(
+        field, map_df, heading=f"{title} – Heat map (plan)",
+        subtitle=(f"Earliest failure within {field.resolution:g} m in plan, per "
+                  f"{field.cell:g} m cell; linear between cells; rounded down to whole "
+                  f"minutes; classes of {field.step} min."),
+        handles=handles, labels=labels, member_colour="white")
+    cmap = matplotlib.colors.ListedColormap(field.colours)
+    norm = matplotlib.colors.BoundaryNorm(np.arange(-0.5, field.n_cls + 1.5), cmap.N)
+    ax.pcolormesh(field.xe, field.ye, np.ma.masked_invalid(field.cls_idx),
+                  cmap=cmap, norm=norm, zorder=1)
+    return _save(fig, path)
+
+
+def plot_failure_contours(stem, map_df, field, *, title):
+    """Filled contours and labelled isochrones of the failure-time field.
+
+    Both are drawn on the triangulation of the cells with steel (the field
+    the heat map interpolates), at the class boundaries. Contouring the
+    continuous field at whole minutes equals classing the rounded-down times,
+    since floor(t) >= n exactly when t >= n. Returns the written paths.
+    """
+    if field.tri is None:
+        return []
+    written = []
+    vals = field.tri_values
+    top = max(float(vals.max()), field.edges[-1]) + 1.0
+    # The contoured field spans the triangulated cell centroids: fit the axes.
+    tri = field.tri
+    extent = (tri.x.min(), tri.x.max(), tri.y.min(), tri.y.max())
+
+    handles, labels = _class_legend(field)
+    fig, ax = _plan_figure(
+        field, map_df, heading=f"{title} – Filled contours (plan)",
+        subtitle=(f"Bands of the earliest failure within {field.resolution:g} m in plan, "
+                  f"linear between {field.cell:g} m cells; rounded down to whole minutes; "
+                  f"classes of {field.step} min."),
+        handles=handles, labels=labels, member_colour="white", extent=extent)
+    ax.tricontourf(field.tri, vals, levels=field.edges + [top],
+                   colors=field.colours, zorder=1)
+    written.append(_save(fig, f"{stem}_contourf.png"))
+
+    handles = [plt.Line2D([], [], color=_INK, lw=1.0),
+               plt.Line2D([], [], color=_MEMBER_LINE_DARK, lw=1.5),
+               plt.Line2D([], [], ls="", marker="o", ms=11, mfc="none", mec=_INK, mew=1.4)]
+    labels = [f"Isochrone (labelled; {field.t_end_min:g} min = not reached)",
+              "Member (plan)", f"First failure ({field.t0} min)"]
+    fig, ax = _plan_figure(
+        field, map_df, heading=f"{title} – Contours (plan)",
+        subtitle=(f"Isochrones every {field.step} min of the earliest failure within "
+                  f"{field.resolution:g} m in plan, linear between {field.cell:g} m cells; "
+                  "rounded down to whole minutes."),
+        handles=handles, labels=labels, member_colour=_MEMBER_LINE_DARK,
+        extent=extent)
+    lines = ax.tricontour(field.tri, vals, levels=field.edges[1:], colors=_INK,
+                          linewidths=0.9, zorder=2.5)
+    ax.clabel(lines, fmt=lambda v: f"{int(round(v))} min", fontsize=8, inline=True)
+    written.append(_save(fig, f"{stem}_contour.png"))
+    return written
 
 
 # ============================================================
@@ -1316,7 +1449,7 @@ def parse_args(argv=None):
              "automatic (default 4).")
     parser.add_argument(
         "--heatmap-cell", metavar="M", type=float,
-        help="Cell size of the plan heat map of failure time in metres "
+        help="Cell size of the plan heat map and contours in metres "
              "(default 0.5).")
     return parser.parse_args(argv)
 
@@ -1439,12 +1572,15 @@ def write_failure_maps(map_df, classes, chid, t_end_s):
             early_is_severe=True, highlight=first,
             highlight_label=f"First failure ({tc['t0']} min)",
             unassigned_label="Not reached / no criterion")
-        heatmap = plot_failure_heatmap(
-            f"{stem}_tcrit_heatmap.png", map_df, tc, t_end_min=t_end_s / 60.0,
-            cell=HEATMAP_CELL,
-            title=f"{chid}: time to reach the critical steel temperature")
-        if heatmap:
-            written.append(heatmap)
+        field = plan_failure_field(map_df, tc, t_end_min=t_end_s / 60.0,
+                                   cell=HEATMAP_CELL)
+        if field is None:
+            print("  Plan collapses to a line - no plan heat map or contours.")
+        else:
+            title = f"{chid}: time to reach the critical steel temperature"
+            written.append(plot_failure_heatmap(
+                f"{stem}_tcrit_heatmap.png", map_df, field, title=title))
+            written += plot_failure_contours(f"{stem}_tcrit", map_df, field, title=title)
         extra = f" (+{len(first) - 1} more)" if len(first) > 1 else ""
         print(f"  First failure: {tc['t0']} min at {first[0]}{extra}")
         counts = map_df["Failure Class"].value_counts()

@@ -43,7 +43,7 @@ failure_map:
   # interval_min: 5           # failure-time class width in whole minutes
                               # (default: automatic; CRE always automatic)
   n_classes: 4                # target number of classes when automatic
-  heatmap_cell: 0.5           # cell size (m) of the plan heat map of failure time
+  heatmap_cell: 0.5           # cell size (m) of the plan heat map and contours
 
 # --- output files ----------------------------------------------------------
 # By default the base names below are prefixed with the CHID, e.g.
