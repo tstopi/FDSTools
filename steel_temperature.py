@@ -15,7 +15,8 @@ Outputs (each prefixed with the scenario CHID, e.g. ``Case_A_...``)
 -------
 * ``<CHID>_steel_temperature_locations.csv`` - steel temperatures, all locations
 * ``<CHID>_steel_fire_results.xlsx``         - workbook (summary/locations/peaks/config)
-* ``<CHID>_member_plots/*.png``              - one temperature plot per member
+* ``<CHID>_member_plots/*.png``              - temperature plot per member; by
+  default only members with utilisation >= 0.8 (``--member-plots all|relevant|none``)
 * ``<CHID>_failure_map_tcrit_<view>.png`` / ``_cre_<view>.png`` - failure-
   location maps, one file per view, plus ``_tcrit_heatmap.png``,
   ``_tcrit_contourf.png`` and ``_tcrit_contour.png`` (plan heat map and
@@ -130,6 +131,13 @@ FAILURE_CLASSES = 4
 
 # Cell size (m) of the plan heat map and contours of failure time.
 HEATMAP_CELL = 0.5
+
+# Which members get a temperature-history plot: "all", "none", or "relevant" -
+# members with a critical temperature whose utilisation (Tmax / Tcrit) is at
+# least MEMBER_PLOT_UTILISATION (so every member that fails is included). One
+# PNG per member dominated the run time on large models.
+MEMBER_PLOTS = "relevant"
+MEMBER_PLOT_UTILISATION = 0.8
 
 INITIAL_STEEL_TEMP = 20.0  # deg C
 
@@ -1459,6 +1467,12 @@ def apply_config(cfg):
     if "heatmap_cell" in fm:
         g["HEATMAP_CELL"] = float(fm["heatmap_cell"])
 
+    mp = cfg.get("member_plots", {})
+    if "mode" in mp:
+        g["MEMBER_PLOTS"] = str(mp["mode"]).lower()
+    if "utilisation" in mp:
+        g["MEMBER_PLOT_UTILISATION"] = float(mp["utilisation"])
+
     for key, name in _OUTPUT_KEYS.items():
         if key in cfg.get("output", {}):
             value = cfg["output"][key]
@@ -1474,6 +1488,16 @@ def apply_config(cfg):
         members = dict(cfg["members"])
         members.setdefault("__default__", MEMBER_PROPERTIES["__default__"])
         g["MEMBER_PROPERTIES"] = members
+
+
+def select_plot_members(summary_df):
+    """Members whose temperature history is plotted, per MEMBER_PLOTS."""
+    if MEMBER_PLOTS == "none":
+        return []
+    if MEMBER_PLOTS == "all":
+        return list(summary_df["Member"])
+    util = pd.to_numeric(summary_df["Utilisation"], errors="coerce")
+    return list(summary_df.loc[util >= MEMBER_PLOT_UTILISATION, "Member"])
 
 
 def parse_args(argv=None):
@@ -1500,6 +1524,14 @@ def parse_args(argv=None):
         "--failure-classes", metavar="N", type=int,
         help="Target number of failure-time classes when the interval is "
              "automatic (default 4).")
+    parser.add_argument(
+        "--member-plots", choices=["relevant", "all", "none"],
+        help="Members to plot: 'relevant' (utilisation >= --plot-utilisation, "
+             "the default), 'all' or 'none'.")
+    parser.add_argument(
+        "--plot-utilisation", metavar="U", type=float,
+        help="Utilisation (Tmax / Tcrit) from which a member counts as relevant "
+             "for plotting (default 0.8).")
     parser.add_argument(
         "--heatmap-cell", metavar="M", type=float,
         help="Cell size of the plan heat map and contours in metres "
@@ -1682,6 +1714,12 @@ def main(argv=None):
         globals()["HEATMAP_CELL"] = args.heatmap_cell
     if not HEATMAP_CELL > 0:
         raise SystemExit(f"Heat-map cell size must be positive (got {HEATMAP_CELL}).")
+    if args.member_plots:
+        globals()["MEMBER_PLOTS"] = args.member_plots
+    if args.plot_utilisation is not None:
+        globals()["MEMBER_PLOT_UTILISATION"] = args.plot_utilisation
+    if MEMBER_PLOTS not in ("relevant", "all", "none"):
+        raise SystemExit(f"member_plots mode must be relevant, all or none (got {MEMBER_PLOTS!r}).")
     globals()["FAILURE_INTERVAL"] = _whole_number_setting(
         FAILURE_INTERVAL, "failure interval (min)")
     globals()["FAILURE_CLASSES"] = _whole_number_setting(
@@ -1825,9 +1863,18 @@ def main(argv=None):
     print(f"Saved {EXCEL_OUTPUT}")
 
     # --- plots ----------------------------------------------------------
-    for member, (hottest_key, series, cfg) in member_hottest.items():
+    to_plot = select_plot_members(summary_df)
+    for member in to_plot:
+        hottest_key, series, cfg = member_hottest[member]
         plot_member(member, time, series, hottest_key, cfg)
-    print(f"Saved {len(member_hottest)} plot(s) to {PLOT_DIR}/")
+    if MEMBER_PLOTS == "relevant":
+        print(f"Saved {len(to_plot)} of {len(member_hottest)} member plot(s) to "
+              f"{PLOT_DIR}/ (utilisation >= {MEMBER_PLOT_UTILISATION:g}; "
+              "--member-plots all for every member)")
+    elif MEMBER_PLOTS == "all":
+        print(f"Saved {len(to_plot)} plot(s) to {PLOT_DIR}/")
+    else:
+        print("Member plots skipped (--member-plots none).")
 
     # --- console report -------------------------------------------------
     print("\n" + "=" * 64)

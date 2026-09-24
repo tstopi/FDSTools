@@ -45,6 +45,14 @@ failure_map:
   n_classes: 4                # target number of classes when automatic
   heatmap_cell: 0.5           # cell size (m) of the plan heat map and contours
 
+# --- member temperature plots ---------------------------------------------
+# One PNG per member is slow on large models, so by default only "relevant"
+# members are plotted: those with a critical temperature whose utilisation
+# (Tmax / Tcrit) is at least `utilisation` - every failing member is included.
+member_plots:
+  mode: relevant              # relevant | all | none (also --member-plots)
+  utilisation: 0.8            # threshold for "relevant" (also --plot-utilisation)
+
 # --- output files ----------------------------------------------------------
 # By default the base names below are prefixed with the CHID, e.g.
 # Case_A_steel_fire_results.xlsx, so scenarios never overwrite each other.
