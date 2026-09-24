@@ -15,7 +15,8 @@ Outputs (each prefixed with the scenario CHID, e.g. ``Case_A_...``)
 -------
 * ``<CHID>_steel_temperature_locations.csv`` - steel temperatures, all locations
 * ``<CHID>_steel_fire_results.xlsx``         - workbook (summary/locations/peaks/config)
-* ``<CHID>_member_plots/*.png``              - one temperature plot per member
+* ``<CHID>_member_plots/*.png``              - temperature plot per member; by
+  default only members with utilisation >= 0.8 (``--member-plots all|relevant|none``)
 * ``<CHID>_failure_map_tcrit_<view>.png`` / ``_cre_<view>.png`` - failure-
   location maps, one file per view, plus ``_tcrit_heatmap.png``,
   ``_tcrit_contourf.png`` and ``_tcrit_contour.png`` (plan heat map and
@@ -130,6 +131,13 @@ FAILURE_CLASSES = 4
 
 # Cell size (m) of the plan heat map and contours of failure time.
 HEATMAP_CELL = 0.5
+
+# Which members get a temperature-history plot: "all", "none", or "relevant" -
+# members with a critical temperature whose utilisation (Tmax / Tcrit) is at
+# least MEMBER_PLOT_UTILISATION (so every member that fails is included). One
+# PNG per member dominated the run time on large models.
+MEMBER_PLOTS = "relevant"
+MEMBER_PLOT_UTILISATION = 0.8
 
 INITIAL_STEEL_TEMP = 20.0  # deg C
 
@@ -332,6 +340,28 @@ def build_location_groups(columns):
     return groups
 
 
+def aggregate_ast_matrix(df, device_groups):
+    """AST of every location at once, shape (n_time, n_locations).
+
+    Array version of :func:`aggregate_ast` (one column per group of face
+    devices); missing values are skipped as in pandas.
+    """
+    method = GROUPING_METHOD.lower()
+    if method not in ("max", "mean"):
+        raise ValueError(f"Unknown GROUPING_METHOD: {GROUPING_METHOD!r} (use 'max' or 'mean')")
+    index = {c: i for i, c in enumerate(df.columns)}
+    values = df.to_numpy(dtype=float)
+    out = np.empty((len(df), len(device_groups)))
+    for j, devs in enumerate(device_groups):
+        block = values[:, [index[d] for d in devs]]
+        if method == "max":
+            out[:, j] = np.fmax.reduce(block, axis=1)      # ignores NaN, like pandas
+        else:
+            n = (~np.isnan(block)).sum(axis=1)
+            out[:, j] = np.where(n > 0, np.nansum(block, axis=1) / np.maximum(n, 1), np.nan)
+    return out
+
+
 def aggregate_ast(df, cols):
     """Combine the face AST columns of one location into a single series."""
     method = GROUPING_METHOD.lower()
@@ -355,74 +385,80 @@ def _substep_times(t0, t1):
     return np.linspace(t0, t1, n + 1)
 
 
-def solve_unprotected_steel(time, ast, AmV):
-    """Integrate the unprotected-member heating equation (EN 1993-1-2 4.2.5.1)."""
+def integrate_unprotected(time, ast, AmV):
+    """Unprotected-member heating (EN 1993-1-2 4.2.5.1), many locations at once.
+
+    *ast* has shape (n_time, n_locations) and *AmV* one value per location;
+    returns the steel temperatures with the same shape as *ast*. The locations
+    are independent, so they are advanced together with array arithmetic -
+    the time loop runs once, not once per location.
+    """
     time = np.asarray(time, dtype=float)
     ast = np.asarray(ast, dtype=float)
-    Ts = np.empty(len(time))
-    Ts[0] = INITIAL_STEEL_TEMP
-    ts = Ts[0]
-
+    AmV = np.asarray(AmV, dtype=float)
+    out = np.empty_like(ast)
+    ts = np.full(ast.shape[1], float(INITIAL_STEEL_TEMP))
+    out[0] = ts
+    coef = CONFIG_FACTOR * EMISSIVITY * SIGMA
     for i in range(1, len(time)):
         edges = _substep_times(time[i - 1], time[i])
+        span = time[i] - time[i - 1] or 1.0
+        a0, da = ast[i - 1], ast[i] - ast[i - 1]
         for k in range(1, len(edges)):
             dt = edges[k] - edges[k - 1]
             # AST linearly interpolated at the start of the sub-step.
-            frac = (edges[k - 1] - time[i - 1]) / (time[i] - time[i - 1] or 1.0)
-            tg = ast[i - 1] + frac * (ast[i] - ast[i - 1])
-
-            h_conv = ALPHA_C * (tg - ts)
-            h_rad = (CONFIG_FACTOR * EMISSIVITY * SIGMA
-                     * ((tg + 273.15) ** 4 - (ts + 273.15) ** 4))
-            h_net = h_conv + h_rad
-
-            ca = steel_specific_heat(ts)
-            ts += SHADOW_FACTOR * AmV / (ca * RHO_STEEL) * h_net * dt
-        Ts[i] = ts
-
-    return Ts
+            tg = a0 + (edges[k - 1] - time[i - 1]) / span * da
+            h_net = ALPHA_C * (tg - ts) + coef * ((tg + 273.15) ** 4 - (ts + 273.15) ** 4)
+            ts = ts + SHADOW_FACTOR * AmV / (steel_specific_heat(ts) * RHO_STEEL) * h_net * dt
+        out[i] = ts
+    return out
 
 
-def solve_protected_steel(time, ast, AmV, protection):
-    """Integrate the protected-member heating equation (EN 1993-1-2 4.2.5.2)."""
+def integrate_protected(time, ast, AmV, dp, lam, rho_p, cp):
+    """Protected-member heating (EN 1993-1-2 4.2.5.2), many locations at once.
+
+    Like :func:`integrate_unprotected`; the protection thickness *dp*,
+    conductivity *lam*, density *rho_p* and specific heat *cp* are given per
+    location (or as scalars).
+    """
     time = np.asarray(time, dtype=float)
     ast = np.asarray(ast, dtype=float)
-    dp = protection["thickness"]
-    lam = protection["conductivity"]
-    rho_p = protection["rho"]
-    cp = protection["cp"]
-
-    Ts = np.empty(len(time))
-    Ts[0] = INITIAL_STEEL_TEMP
-    ts = Ts[0]
-
+    AmV, dp, lam, rho_p, cp = (np.asarray(v, dtype=float) for v in (AmV, dp, lam, rho_p, cp))
+    out = np.empty_like(ast)
+    ts = np.full(ast.shape[1], float(INITIAL_STEEL_TEMP))
+    out[0] = ts
     for i in range(1, len(time)):
         edges = _substep_times(time[i - 1], time[i])
+        span = time[i] - time[i - 1] or 1.0
+        a0, da = ast[i - 1], ast[i] - ast[i - 1]
         for k in range(1, len(edges)):
             dt = edges[k] - edges[k - 1]
-            span = time[i] - time[i - 1] or 1.0
-            f0 = (edges[k - 1] - time[i - 1]) / span
-            f1 = (edges[k] - time[i - 1]) / span
-            tg0 = ast[i - 1] + f0 * (ast[i] - ast[i - 1])
-            tg1 = ast[i - 1] + f1 * (ast[i] - ast[i - 1])
+            tg0 = a0 + (edges[k - 1] - time[i - 1]) / span * da
+            tg1 = a0 + (edges[k] - time[i - 1]) / span * da
             dtg = tg1 - tg0  # gas-temperature increment over the sub-step
-
             ca = steel_specific_heat(ts)
             # phi: ratio of protection heat capacity to steel heat capacity.
             phi = (cp * rho_p / (ca * RHO_STEEL)) * dp * AmV
-
-            d_ts = (
-                (lam * AmV) / (dp * ca * RHO_STEEL)
-                * (tg0 - ts) / (1.0 + phi / 3.0) * dt
-                - (np.exp(phi / 10.0) - 1.0) * dtg
-            )
+            d_ts = ((lam * AmV) / (dp * ca * RHO_STEEL) * (tg0 - ts) / (1.0 + phi / 3.0) * dt
+                    - (np.exp(phi / 10.0) - 1.0) * dtg)
             # EN 1993-1-2: no negative increment while the gas is heating.
-            if d_ts < 0.0 and dtg > 0.0:
-                d_ts = 0.0
-            ts += d_ts
-        Ts[i] = ts
+            d_ts = np.where((d_ts < 0.0) & (dtg > 0.0), 0.0, d_ts)
+            ts = ts + d_ts
+        out[i] = ts
+    return out
 
-    return Ts
+
+def solve_unprotected_steel(time, ast, AmV):
+    """Unprotected-member heating for one location (EN 1993-1-2 4.2.5.1)."""
+    return integrate_unprotected(time, np.asarray(ast, dtype=float)[:, None], [AmV])[:, 0]
+
+
+def solve_protected_steel(time, ast, AmV, protection):
+    """Protected-member heating for one location (EN 1993-1-2 4.2.5.2)."""
+    return integrate_protected(
+        time, np.asarray(ast, dtype=float)[:, None], [AmV],
+        protection["thickness"], protection["conductivity"],
+        protection["rho"], protection["cp"])[:, 0]
 
 
 # ============================================================
@@ -439,14 +475,17 @@ def find_critical_time(time, temperature, critical_temp):
     if temperature[0] >= critical_temp:
         return float(time[0])
 
-    for i in range(1, len(time)):
-        t1, t2 = temperature[i - 1], temperature[i]
-        if t1 < critical_temp <= t2:
-            if abs(t2 - t1) < 1e-12:
-                return float(time[i])
-            frac = (critical_temp - t1) / (t2 - t1)
-            return float(time[i - 1] + frac * (time[i] - time[i - 1]))
-    return None
+    # First step whose start is below and whose end is at/above the criterion.
+    crossings = np.flatnonzero((temperature[:-1] < critical_temp)
+                               & (critical_temp <= temperature[1:]))
+    if crossings.size == 0:
+        return None
+    i = int(crossings[0]) + 1
+    t1, t2 = temperature[i - 1], temperature[i]
+    if abs(t2 - t1) < 1e-12:
+        return float(time[i])
+    frac = (critical_temp - t1) / (t2 - t1)
+    return float(time[i - 1] + frac * (time[i] - time[i - 1]))
 
 
 # ============================================================
@@ -498,17 +537,31 @@ def cumulative_radiant_energy(time, exposure_temp):
     return float(_trapz(_excess_radiant(exposure_temp), time))
 
 
+_ISO_CACHE = {}
+
+
+def _iso_cumulative_energy(ambient_temp, max_time):
+    """ISO 834 time grid (1 s) and its cumulative excess radiant energy."""
+    key = (float(ambient_temp), float(max_time))
+    if key not in _ISO_CACHE:
+        dt = 1.0
+        grid = np.arange(0.0, max_time + dt, dt)
+        iso_excess = _excess_radiant(iso834_temperature(grid), ambient_temp)
+        _ISO_CACHE[key] = (grid, np.concatenate(
+            ([0.0], np.cumsum((iso_excess[1:] + iso_excess[:-1]) * dt / 2.0))))
+    return _ISO_CACHE[key]
+
+
 def equivalent_time_cre(time, exposure_temp):
     """CRE-equivalent ISO 834 exposure time, s (None if the exposure is nil)."""
     e_nat = cumulative_radiant_energy(time, exposure_temp)
     if e_nat <= 0.0:
         return 0.0
 
-    # Cumulative radiant energy of the ISO 834 curve on a 1 s grid.
+    # Cumulative radiant energy of the ISO 834 curve on a 1 s grid (cached;
+    # it depends only on the ambient baseline and the search cap).
     dt = 1.0
-    grid = np.arange(0.0, CRE_MAX_EQUIV_TIME + dt, dt)
-    iso_excess = _excess_radiant(iso834_temperature(grid))
-    e_iso = np.concatenate(([0.0], np.cumsum((iso_excess[1:] + iso_excess[:-1]) * dt / 2.0)))
+    grid, e_iso = _iso_cumulative_energy(CRE_AMBIENT_TEMP, CRE_MAX_EQUIV_TIME)
 
     if e_nat >= e_iso[-1]:
         return None  # exceeds the search cap; exposure hotter/longer than cap
@@ -576,15 +629,23 @@ def write_excel(path, summary_df, location_df, peaks_df, config_df, map_df=None)
         peaks_df.to_excel(xl, sheet_name="Member Peaks", index=False)
         config_df.to_excel(xl, sheet_name="Configuration", index=False)
 
+        frames = {"Member Summary": summary_df, "Location Map": map_df,
+                  "Location Temperatures": location_df, "Member Peaks": peaks_df,
+                  "Configuration": config_df}
         for ws in xl.book.worksheets:
-            # Style the header row and auto-size columns.
+            # Style the header row and size the columns. Widths come from the
+            # header and a sample of up to 200 rows: scanning every cell of a
+            # large time-history sheet dominated the run time.
             for cell in ws[1]:
                 cell.fill = header_fill
                 cell.font = header_font
-            for col_cells in ws.columns:
-                width = max((len(str(c.value)) for c in col_cells if c.value is not None),
-                            default=8)
-                ws.column_dimensions[get_column_letter(col_cells[0].column)].width = min(width + 3, 40)
+            frame = frames[ws.title]
+            step = max(1, len(frame) // 200)
+            sample = frame.iloc[::step]
+            for j, col in enumerate(frame.columns, start=1):
+                width = max([len(str(col))] + [len(str(v)) for v in sample[col]
+                                               if v is not None and not pd.isna(v)])
+                ws.column_dimensions[get_column_letter(j)].width = min(width + 3, 40)
             ws.freeze_panes = "A2"
 
         # Colour the Member Summary rows by critical-temperature exceedance.
@@ -1406,6 +1467,12 @@ def apply_config(cfg):
     if "heatmap_cell" in fm:
         g["HEATMAP_CELL"] = float(fm["heatmap_cell"])
 
+    mp = cfg.get("member_plots", {})
+    if "mode" in mp:
+        g["MEMBER_PLOTS"] = str(mp["mode"]).lower()
+    if "utilisation" in mp:
+        g["MEMBER_PLOT_UTILISATION"] = float(mp["utilisation"])
+
     for key, name in _OUTPUT_KEYS.items():
         if key in cfg.get("output", {}):
             value = cfg["output"][key]
@@ -1421,6 +1488,16 @@ def apply_config(cfg):
         members = dict(cfg["members"])
         members.setdefault("__default__", MEMBER_PROPERTIES["__default__"])
         g["MEMBER_PROPERTIES"] = members
+
+
+def select_plot_members(summary_df):
+    """Members whose temperature history is plotted, per MEMBER_PLOTS."""
+    if MEMBER_PLOTS == "none":
+        return []
+    if MEMBER_PLOTS == "all":
+        return list(summary_df["Member"])
+    util = pd.to_numeric(summary_df["Utilisation"], errors="coerce")
+    return list(summary_df.loc[util >= MEMBER_PLOT_UTILISATION, "Member"])
 
 
 def parse_args(argv=None):
@@ -1447,6 +1524,14 @@ def parse_args(argv=None):
         "--failure-classes", metavar="N", type=int,
         help="Target number of failure-time classes when the interval is "
              "automatic (default 4).")
+    parser.add_argument(
+        "--member-plots", choices=["relevant", "all", "none"],
+        help="Members to plot: 'relevant' (utilisation >= --plot-utilisation, "
+             "the default), 'all' or 'none'.")
+    parser.add_argument(
+        "--plot-utilisation", metavar="U", type=float,
+        help="Utilisation (Tmax / Tcrit) from which a member counts as relevant "
+             "for plotting (default 0.8).")
     parser.add_argument(
         "--heatmap-cell", metavar="M", type=float,
         help="Cell size of the plan heat map and contours in metres "
@@ -1629,6 +1714,12 @@ def main(argv=None):
         globals()["HEATMAP_CELL"] = args.heatmap_cell
     if not HEATMAP_CELL > 0:
         raise SystemExit(f"Heat-map cell size must be positive (got {HEATMAP_CELL}).")
+    if args.member_plots:
+        globals()["MEMBER_PLOTS"] = args.member_plots
+    if args.plot_utilisation is not None:
+        globals()["MEMBER_PLOT_UTILISATION"] = args.plot_utilisation
+    if MEMBER_PLOTS not in ("relevant", "all", "none"):
+        raise SystemExit(f"member_plots mode must be relevant, all or none (got {MEMBER_PLOTS!r}).")
     globals()["FAILURE_INTERVAL"] = _whole_number_setting(
         FAILURE_INTERVAL, "failure interval (min)")
     globals()["FAILURE_CLASSES"] = _whole_number_setting(
@@ -1658,18 +1749,28 @@ def main(argv=None):
     location_ast: dict[str, np.ndarray] = {}
     member_locations: dict[str, list[str]] = {}
 
-    for (member, location), devs in sorted(groups.items()):
-        cfg = get_member_config(member)
-        ast = aggregate_ast(df, devs).to_numpy(dtype=float)
+    # All locations are advanced together (one time loop, array arithmetic),
+    # split into the unprotected and protected formulations.
+    items = sorted(groups.items())
+    configs = [get_member_config(member) for (member, _), _ in items]
+    ast_all = aggregate_ast_matrix(df, [devs for _, devs in items])
+    steel_all = np.empty_like(ast_all)
+    unprot = [j for j, c in enumerate(configs) if not c.protected]
+    prot = [j for j, c in enumerate(configs) if c.protected]
+    if unprot:
+        steel_all[:, unprot] = integrate_unprotected(
+            time, ast_all[:, unprot], [configs[j].AmV for j in unprot])
+    if prot:
+        pr = [configs[j].protection for j in prot]
+        steel_all[:, prot] = integrate_protected(
+            time, ast_all[:, prot], [configs[j].AmV for j in prot],
+            [q["thickness"] for q in pr], [q["conductivity"] for q in pr],
+            [q["rho"] for q in pr], [q["cp"] for q in pr])
 
-        if cfg.protected:
-            steel = solve_protected_steel(time, ast, cfg.AmV, cfg.protection)
-        else:
-            steel = solve_unprotected_steel(time, ast, cfg.AmV)
-
+    for j, ((member, location), _) in enumerate(items):
         key = f"{member}_{location}"
-        location_data[key] = steel
-        location_ast[key] = ast
+        location_data[key] = steel_all[:, j]
+        location_ast[key] = ast_all[:, j]
         member_locations.setdefault(member, []).append(key)
 
     # Build in one shot to avoid DataFrame fragmentation.
@@ -1762,9 +1863,18 @@ def main(argv=None):
     print(f"Saved {EXCEL_OUTPUT}")
 
     # --- plots ----------------------------------------------------------
-    for member, (hottest_key, series, cfg) in member_hottest.items():
+    to_plot = select_plot_members(summary_df)
+    for member in to_plot:
+        hottest_key, series, cfg = member_hottest[member]
         plot_member(member, time, series, hottest_key, cfg)
-    print(f"Saved {len(member_hottest)} plot(s) to {PLOT_DIR}/")
+    if MEMBER_PLOTS == "relevant":
+        print(f"Saved {len(to_plot)} of {len(member_hottest)} member plot(s) to "
+              f"{PLOT_DIR}/ (utilisation >= {MEMBER_PLOT_UTILISATION:g}; "
+              "--member-plots all for every member)")
+    elif MEMBER_PLOTS == "all":
+        print(f"Saved {len(to_plot)} plot(s) to {PLOT_DIR}/")
+    else:
+        print("Member plots skipped (--member-plots none).")
 
     # --- console report -------------------------------------------------
     print("\n" + "=" * 64)
