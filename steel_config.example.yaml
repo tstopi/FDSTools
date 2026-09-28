@@ -12,6 +12,8 @@ input_csv: fds_devc.csv        # FDS <CHID>_devc.csv (also settable with --input
 # chid: Case_A                 # scenario id prepended to outputs; default: derived
 #                              # from input_csv (<CHID>_devc.csv). Also --chid.
 grouping_method: max           # "max" (conservative) or "mean" over a location's faces
+time_offset_min: 0            # min added to all reported times: > 0 incipient phase
+#                              # (steel at ambient), < 0 shift earlier. Also --time-offset.
 # fds_input: Case_A.fds        # FDS input whose &DEVC lines (and &CATF includes)
 #                              # locate the devices; enables the failure maps. Also --fds.
 initial_steel_temp: 20.0       # deg C
