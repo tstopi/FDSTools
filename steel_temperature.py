@@ -54,11 +54,12 @@ or drive everything from an external YAML/JSON config (see
     python steel_temperature.py --config my_project.yaml
     python steel_temperature.py --config my_project.yaml --input CHID_devc.csv
 
-An incipient phase before the simulated fire can be added with
-``--time-offset MIN`` (or ``time_offset_min`` in the config). The steel is
-taken to stay at ambient temperature during it, so the offset is added to all
-reported times; the CRE equivalent time, a measure of the fire's heat, is
-unchanged.
+A time offset ``--time-offset MIN`` (or ``time_offset_min`` in the config) is
+added to all reported times; the steel heating and the CRE equivalent time (a
+measure of the fire's heat) are unchanged. A positive offset is an incipient
+phase before the simulated fire, with the steel at ambient; a negative offset
+shifts all times earlier, e.g. to discount a slow start included in the
+simulation (failures before the new time zero then get negative times).
 
 Failure-location maps
 ---------------------
@@ -121,11 +122,14 @@ INPUT_CSV = "fds_devc.csv"
 # several scenarios can be post-processed side by side without overwriting.
 CHID = None
 
-# Incipient phase before the fire starts to grow, in minutes. The simulation's
-# t = 0 is taken as the end of this phase and the steel is assumed to stay at
-# ambient temperature during it, so the offset is simply added to every
-# reported time (critical times, failure maps, time columns). The CRE
-# equivalent time is unaffected: the phase adds no radiant energy.
+# Time offset in minutes, added to every reported time (critical times, failure
+# maps, time columns); the steel heating itself is unchanged.
+#  > 0: an incipient phase before the simulated fire - the simulation's t = 0
+#       is the end of that phase and the steel stays at ambient during it.
+#  < 0: a plain clock shift - all times move earlier (e.g. to discount a slow
+#       start included in the simulation); failures before the new time zero
+#       get negative times.
+# The CRE equivalent time is unaffected either way.
 TIME_OFFSET_MIN = 0.0
 
 # How the AST devices on the faces of one location are combined into a single
@@ -684,7 +688,7 @@ def write_excel(path, summary_df, location_df, peaks_df, config_df, map_df=None)
 
 def plot_member(member, time, series, hottest_location, config):
     plt.figure(figsize=(10, 6))
-    if TIME_OFFSET_MIN:
+    if TIME_OFFSET_MIN > 0:
         # Incipient phase: steel at ambient until the simulated fire starts.
         offset_s = TIME_OFFSET_MIN * 60.0
         plt.axvspan(0, offset_s, color="#e6e5e0", zorder=0,
@@ -714,8 +718,11 @@ def plot_member(member, time, series, hottest_location, config):
     plt.plot(time[i_max], tmax, "^", color="black", markersize=7,
              label=f"Max = {tmax:.0f} °C")
 
-    if TIME_OFFSET_MIN:
+    if TIME_OFFSET_MIN > 0:
         plt.xlim(left=0)   # after all data is drawn, so autoscaling still applies
+    elif TIME_OFFSET_MIN < 0:
+        plt.axvline(0, color="#52514e", linestyle=":", linewidth=1.2,
+                    label=f"Time zero (offset {TIME_OFFSET_MIN:g} min)")
     plt.xlabel("Time (s)")
     plt.ylabel("Steel Temperature (°C)")
     plt.title(f"{member}   (hottest location: {hottest_location})")
@@ -902,8 +909,19 @@ def failure_classes(minutes, interval=None, n_classes=4):
     return {"t0": t0, "step": step, "assign": assign, "starts": starts}
 
 
+def fmt_minutes(n):
+    """Whole minutes for labels, with a true minus sign for negative times."""
+    n = int(n)
+    return f"−{-n}" if n < 0 else str(n)
+
+
 def class_label(start, step):
-    return f"{start} min" if step == 1 else f"{start}–{start + step - 1} min"
+    end = start + step - 1
+    if step == 1:
+        return f"{fmt_minutes(start)} min"
+    if start < 0:   # "−5 to 4 min" reads better than a dash between signs
+        return f"{fmt_minutes(start)} to {fmt_minutes(end)} min"
+    return f"{start}–{end} min"
 
 
 # ============================================================
@@ -982,7 +1000,9 @@ def _offset_note():
     """Subtitle note on the incipient-phase offset (empty when there is none)."""
     if not TIME_OFFSET_MIN:
         return ""
-    return f" Includes a {TIME_OFFSET_MIN:g} min incipient phase before the simulated fire."
+    if TIME_OFFSET_MIN > 0:
+        return f" Includes a {TIME_OFFSET_MIN:g} min incipient phase before the simulated fire."
+    return f" Times shifted {-TIME_OFFSET_MIN:g} min earlier by the time offset."
 
 
 def _wrap_subtitle(subtitle, fig_w):
@@ -1220,7 +1240,9 @@ def plan_failure_field(map_df, classes, *, t_end_min, cell):
     edges = [e for e in edges if e < t_end_min] + [float(t_end_min)]
     n_cls = len(edges) - 1
     labels = [class_label(int(a), step) if b - a == step else
-              (f"{int(a)} min" if last_minute <= a else f"{int(a)}–{last_minute} min")
+              (f"{fmt_minutes(a)} min" if last_minute <= a else
+               f"{fmt_minutes(a)} to {fmt_minutes(last_minute)} min" if a < 0 else
+               f"{int(a)}–{last_minute} min")
               for a, b in zip(edges[:-1], edges[1:])]
 
     # Earliest failure per cell (not reached -> simulation end).
@@ -1323,7 +1345,7 @@ def _class_legend(field):
     labels.append("Member (plan)")
     handles.append(plt.Line2D([], [], ls="", marker="o", ms=11, mfc="none",
                               mec=_INK, mew=1.4))
-    labels.append(f"First failure ({field.t0} min)")
+    labels.append(f"First failure ({fmt_minutes(field.t0)} min)")
     return handles, labels
 
 
@@ -1382,7 +1404,7 @@ def plot_failure_contours(stem, map_df, field, *, title):
                plt.Line2D([], [], color=_MEMBER_LINE_DARK, lw=1.5),
                plt.Line2D([], [], ls="", marker="o", ms=11, mfc="none", mec=_INK, mew=1.4)]
     labels = [f"Isochrone (labelled; {field.t_end_min:g} min = not reached)",
-              "Member (plan)", f"First failure ({field.t0} min)"]
+              "Member (plan)", f"First failure ({fmt_minutes(field.t0)} min)"]
     fig, ax = _plan_figure(
         field, map_df, heading=f"{title} – Contours (plan)",
         subtitle=(f"Isochrones every {field.step} min of the earliest failure within "
@@ -1552,8 +1574,9 @@ def parse_args(argv=None):
              "(default: derived from the input filename).")
     parser.add_argument(
         "--time-offset", metavar="MIN", type=float,
-        help="Incipient phase before the simulated fire, in minutes; added to "
-             "all reported times (default 0).")
+        help="Time offset in minutes added to all reported times: positive = "
+             "incipient phase before the simulated fire, negative = clock shift "
+             "to earlier times (default 0).")
     parser.add_argument(
         "--fds", metavar="FDS",
         help="FDS input file; its &DEVC lines locate the devices and enable "
@@ -1696,7 +1719,7 @@ def write_failure_maps(map_df, classes, chid, t_end_s):
             f"{stem}_tcrit", points, tc,
             title=f"{chid}: time to reach the critical steel temperature",
             early_is_severe=True, highlight=first,
-            highlight_label=f"First failure ({tc['t0']} min)",
+            highlight_label=f"First failure ({fmt_minutes(tc['t0'])} min)",
             unassigned_label="Not reached / no criterion", note=_offset_note())
         field = plan_failure_field(map_df, tc, t_end_min=t_end_s / 60.0,
                                    cell=HEATMAP_CELL)
@@ -1750,8 +1773,6 @@ def main(argv=None):
     if args.time_offset is not None:
         globals()["TIME_OFFSET_MIN"] = args.time_offset
     globals()["TIME_OFFSET_MIN"] = float(TIME_OFFSET_MIN or 0.0)
-    if TIME_OFFSET_MIN < 0:
-        raise SystemExit(f"Time offset must not be negative (got {TIME_OFFSET_MIN:g} min).")
     if args.failure_interval is not None:
         globals()["FAILURE_INTERVAL"] = args.failure_interval
     if args.failure_classes is not None:
@@ -1782,10 +1803,14 @@ def main(argv=None):
     df, time_col = read_devc_csv(INPUT_CSV)
     time = df[time_col].to_numpy(dtype=float)
     if TIME_OFFSET_MIN:
-        # Steel at ambient during the incipient phase: only the clock moves.
+        # Only the clock moves; the steel heating is unchanged.
         time = time + TIME_OFFSET_MIN * 60.0
-        print(f"Offset:  {TIME_OFFSET_MIN:g} min incipient phase added to all "
-              "reported times (CRE equivalent time unaffected).")
+        if TIME_OFFSET_MIN > 0:
+            print(f"Offset:  {TIME_OFFSET_MIN:g} min incipient phase added to all "
+                  "reported times (CRE equivalent time unaffected).")
+        else:
+            print(f"Offset:  all reported times shifted {-TIME_OFFSET_MIN:g} min "
+                  "earlier (steel heating and CRE equivalent time unaffected).")
 
     device_columns = [c for c in df.columns if c != time_col]
     groups = build_location_groups(device_columns)
@@ -1884,6 +1909,11 @@ def main(argv=None):
         summary_rows.append(row)
 
     summary_df = pd.DataFrame(summary_rows)
+    if TIME_OFFSET_MIN < 0:
+        early = pd.to_numeric(summary_df["Critical Time (s)"], errors="coerce") < 0
+        if early.any():
+            print(f"  NOTE: {int(early.sum())} member(s) reach the critical temperature "
+                  "before time zero; their critical times are negative.")
     peaks = pd.DataFrame(peaks_data)
 
     # --- configuration audit sheet --------------------------------------
