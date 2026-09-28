@@ -54,6 +54,12 @@ or drive everything from an external YAML/JSON config (see
     python steel_temperature.py --config my_project.yaml
     python steel_temperature.py --config my_project.yaml --input CHID_devc.csv
 
+An incipient phase before the simulated fire can be added with
+``--time-offset MIN`` (or ``time_offset_min`` in the config). The steel is
+taken to stay at ambient temperature during it, so the offset is added to all
+reported times; the CRE equivalent time, a measure of the fire's heat, is
+unchanged.
+
 Failure-location maps
 ---------------------
 Given the FDS input file (``--fds model.fds``), the &DEVC lines - including
@@ -114,6 +120,13 @@ INPUT_CSV = "fds_devc.csv"
 # (``<CHID>_devc.csv`` -> ``<CHID>``) and prepended to every output name, so
 # several scenarios can be post-processed side by side without overwriting.
 CHID = None
+
+# Incipient phase before the fire starts to grow, in minutes. The simulation's
+# t = 0 is taken as the end of this phase and the steel is assumed to stay at
+# ambient temperature during it, so the offset is simply added to every
+# reported time (critical times, failure maps, time columns). The CRE
+# equivalent time is unaffected: the phase adds no radiant energy.
+TIME_OFFSET_MIN = 0.0
 
 # How the AST devices on the faces of one location are combined into a single
 # thermal boundary condition. "max" is conservative and recommended.
@@ -671,6 +684,12 @@ def write_excel(path, summary_df, location_df, peaks_df, config_df, map_df=None)
 
 def plot_member(member, time, series, hottest_location, config):
     plt.figure(figsize=(10, 6))
+    if TIME_OFFSET_MIN:
+        # Incipient phase: steel at ambient until the simulated fire starts.
+        offset_s = TIME_OFFSET_MIN * 60.0
+        plt.axvspan(0, offset_s, color="#e6e5e0", zorder=0,
+                    label=f"Incipient phase ({TIME_OFFSET_MIN:g} min)")
+        plt.plot([0, offset_s], [series[0], series[0]], linewidth=2, color="#1f4e79")
     plt.plot(time, series, linewidth=2, color="#1f4e79", label=f"{member} steel temp")
 
     crit = config.critical_temp
@@ -695,6 +714,8 @@ def plot_member(member, time, series, hottest_location, config):
     plt.plot(time[i_max], tmax, "^", color="black", markersize=7,
              label=f"Max = {tmax:.0f} °C")
 
+    if TIME_OFFSET_MIN:
+        plt.xlim(left=0)   # after all data is drawn, so autoscaling still applies
     plt.xlabel("Time (s)")
     plt.ylabel("Steel Temperature (°C)")
     plt.title(f"{member}   (hottest location: {hottest_location})")
@@ -957,6 +978,22 @@ def _save_trimmed(fig, path, top_in, bottom_in, pad_in=0.2):
         path, dpi=(dpi, dpi))
 
 
+def _offset_note():
+    """Subtitle note on the incipient-phase offset (empty when there is none)."""
+    if not TIME_OFFSET_MIN:
+        return ""
+    return f" Includes a {TIME_OFFSET_MIN:g} min incipient phase before the simulated fire."
+
+
+def _wrap_subtitle(subtitle, fig_w):
+    """Wrap *subtitle* to the figure width (~0.068 in per character at 9 pt).
+
+    Returns the wrapped text and the extra height (in) its additional lines need.
+    """
+    lines = textwrap.wrap(subtitle, width=max(40, int((fig_w - 0.6) / 0.068)))
+    return "\n".join(lines), 0.16 * (len(lines) - 1)
+
+
 def _legend_layout(labels, fig_w):
     """Columns and height (inches) of a legend wrapped to the figure width."""
     entry_w = max(len(s) for s in labels) * 0.075 + 0.55
@@ -978,7 +1015,7 @@ def _title_and_legend(fig, fig_w, fig_h, heading, subtitle, handles, labels,
 
 
 def plot_failure_map(stem, points, classes, *, title, early_is_severe,
-                     highlight, highlight_label, unassigned_label):
+                     highlight, highlight_label, unassigned_label, note=""):
     """Write one PNG per view (plan, elevations, isometric); return the paths.
 
     *points* has columns key, member, location, x, y, z. *classes* is the
@@ -1044,11 +1081,11 @@ def plot_failure_map(stem, points, classes, *, title, early_is_severe,
     handles.append(plt.Line2D([], [], color=_MEMBER_LINE, lw=1.5))
     labels.append("Member")
     subtitle = (f"Times rounded down to whole minutes; classes of {step} min "
-                f"starting at {classes['t0']} min.")
+                f"starting at {classes['t0']} min." + note)
 
-    def finish(fig, fig_w, fig_h, view_label, legend_top_in):
+    def finish(fig, fig_w, fig_h, view_label, legend_top_in, sub):
         _title_and_legend(fig, fig_w, fig_h, f"{title} – {view_label}",
-                          subtitle, handles, labels, legend_top_in)
+                          sub, handles, labels, legend_top_in)
 
     written = []
     for suffix, a, b, view_label in _VIEWS_2D:
@@ -1063,7 +1100,8 @@ def plot_failure_map(stem, points, classes, *, title, early_is_severe,
 
         fig_w = max(ax_w + 1.3, 8.0)
         _, legend_h = _legend_layout(labels, fig_w)
-        top, xlab = 0.95, 0.6
+        sub, extra = _wrap_subtitle(subtitle, fig_w)
+        top, xlab = 0.95 + extra, 0.6
         fig_h = top + ax_h + xlab + legend_h
         fig = plt.figure(figsize=(fig_w, fig_h), facecolor=_SURFACE)
         left = max(0.9, (fig_w - ax_w) / 2)
@@ -1081,7 +1119,7 @@ def plot_failure_map(stem, points, classes, *, title, early_is_severe,
             nbins=max(2, int(ax_h / 0.45)), steps=[1, 2, 2.5, 5, 10]))
         for spine in ax.spines.values():
             spine.set_color("#d4d3cd")
-        finish(fig, fig_w, fig_h, view_label, legend_h)
+        finish(fig, fig_w, fig_h, view_label, legend_h, sub)
 
         path = f"{stem}_{suffix}.png"
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -1093,7 +1131,8 @@ def plot_failure_map(stem, points, classes, *, title, early_is_severe,
         fig_w, fig_h = 11.0, 9.0
         fig = plt.figure(figsize=(fig_w, fig_h), dpi=200, facecolor=_SURFACE)
         _, legend_h = _legend_layout(labels, fig_w)
-        top_band, bottom_band = 0.9, legend_h + 0.1
+        sub, extra = _wrap_subtitle(subtitle, fig_w)
+        top_band, bottom_band = 0.9 + extra, legend_h + 0.1
         ax3d = fig.add_axes([0.02, bottom_band / fig_h, 0.96,
                              1 - (top_band + bottom_band) / fig_h], projection="3d")
         draw(ax3d, ("x", "y", "z"))
@@ -1109,7 +1148,7 @@ def plot_failure_map(stem, points, classes, *, title, early_is_severe,
         ax3d.view_init(elev=25, azim=-60)
         ax3d.set_facecolor(_SURFACE)
         ax3d.tick_params(colors=_INK_2, labelsize=7)
-        finish(fig, fig_w, fig_h, "Isometric", legend_h)
+        finish(fig, fig_w, fig_h, "Isometric", legend_h, sub)
         path = f"{stem}_isometric.png"
         _save_trimmed(fig, path, top_band, bottom_band)
         plt.close(fig)
@@ -1251,11 +1290,8 @@ def _plan_figure(field, map_df, *, heading, subtitle, handles, labels,
     ax_w, ax_h = gx * scale, gy * scale
     fig_w = max(ax_w + 1.3, 8.0)
     _, legend_h = _legend_layout(labels, fig_w)
-    # Wrap a long subtitle to the figure width (about 0.068 in per character
-    # at 9 pt) and make room for the extra lines.
-    lines = textwrap.wrap(subtitle, width=max(40, int((fig_w - 0.6) / 0.068)))
-    subtitle = "\n".join(lines)
-    top, xlab = 0.95 + 0.16 * (len(lines) - 1), 0.6
+    subtitle, extra = _wrap_subtitle(subtitle, fig_w)
+    top, xlab = 0.95 + extra, 0.6
     fig_h = top + ax_h + xlab + legend_h
     fig = plt.figure(figsize=(fig_w, fig_h), facecolor=_SURFACE)
     left = max(0.9, (fig_w - ax_w) / 2)
@@ -1305,7 +1341,7 @@ def plot_failure_heatmap(path, map_df, field, *, title):
         field, map_df, heading=f"{title} – Heat map (plan)",
         subtitle=(f"Earliest failure within {field.resolution:g} m in plan, per "
                   f"{field.cell:g} m cell; linear between cells; rounded down to whole "
-                  f"minutes; classes of {field.step} min."),
+                  f"minutes; classes of {field.step} min." + _offset_note()),
         handles=handles, labels=labels, member_colour="white")
     cmap = matplotlib.colors.ListedColormap(field.colours)
     norm = matplotlib.colors.BoundaryNorm(np.arange(-0.5, field.n_cls + 1.5), cmap.N)
@@ -1336,7 +1372,7 @@ def plot_failure_contours(stem, map_df, field, *, title):
         field, map_df, heading=f"{title} – Filled contours (plan)",
         subtitle=(f"Bands of the earliest failure within {field.resolution:g} m in plan, "
                   f"linear between {field.cell:g} m cells; rounded down to whole minutes; "
-                  f"classes of {field.step} min."),
+                  f"classes of {field.step} min." + _offset_note()),
         handles=handles, labels=labels, member_colour="white", extent=extent)
     ax.tricontourf(field.tri, vals, levels=field.edges + [top],
                    colors=field.colours, zorder=1)
@@ -1351,7 +1387,7 @@ def plot_failure_contours(stem, map_df, field, *, title):
         field, map_df, heading=f"{title} – Contours (plan)",
         subtitle=(f"Isochrones every {field.step} min of the earliest failure within "
                   f"{field.resolution:g} m in plan, linear between {field.cell:g} m cells; "
-                  "rounded down to whole minutes."),
+                  "rounded down to whole minutes." + _offset_note()),
         handles=handles, labels=labels, member_colour=_MEMBER_LINE_DARK,
         extent=extent)
     lines = ax.tricontour(field.tri, vals, levels=field.edges[1:], colors=_INK,
@@ -1377,6 +1413,7 @@ _SCALAR_KEYS = {
     "initial_steel_temp": "INITIAL_STEEL_TEMP",
     "max_time_step": "MAX_TIME_STEP",
     "fds_input": "FDS_INPUT",
+    "time_offset_min": "TIME_OFFSET_MIN",
 }
 _FIRE_KEYS = {
     "alpha_c": "ALPHA_C",
@@ -1513,6 +1550,10 @@ def parse_args(argv=None):
         "--chid", metavar="CHID",
         help="Scenario identifier prepended to output names "
              "(default: derived from the input filename).")
+    parser.add_argument(
+        "--time-offset", metavar="MIN", type=float,
+        help="Incipient phase before the simulated fire, in minutes; added to "
+             "all reported times (default 0).")
     parser.add_argument(
         "--fds", metavar="FDS",
         help="FDS input file; its &DEVC lines locate the devices and enable "
@@ -1656,7 +1697,7 @@ def write_failure_maps(map_df, classes, chid, t_end_s):
             title=f"{chid}: time to reach the critical steel temperature",
             early_is_severe=True, highlight=first,
             highlight_label=f"First failure ({tc['t0']} min)",
-            unassigned_label="Not reached / no criterion")
+            unassigned_label="Not reached / no criterion", note=_offset_note())
         field = plan_failure_field(map_df, tc, t_end_min=t_end_s / 60.0,
                                    cell=HEATMAP_CELL)
         if field is None:
@@ -1706,6 +1747,11 @@ def main(argv=None):
         globals()["CHID"] = args.chid
     if args.fds:
         globals()["FDS_INPUT"] = args.fds
+    if args.time_offset is not None:
+        globals()["TIME_OFFSET_MIN"] = args.time_offset
+    globals()["TIME_OFFSET_MIN"] = float(TIME_OFFSET_MIN or 0.0)
+    if TIME_OFFSET_MIN < 0:
+        raise SystemExit(f"Time offset must not be negative (got {TIME_OFFSET_MIN:g} min).")
     if args.failure_interval is not None:
         globals()["FAILURE_INTERVAL"] = args.failure_interval
     if args.failure_classes is not None:
@@ -1735,6 +1781,11 @@ def main(argv=None):
     print(f"Reading: {INPUT_CSV}")
     df, time_col = read_devc_csv(INPUT_CSV)
     time = df[time_col].to_numpy(dtype=float)
+    if TIME_OFFSET_MIN:
+        # Steel at ambient during the incipient phase: only the clock moves.
+        time = time + TIME_OFFSET_MIN * 60.0
+        print(f"Offset:  {TIME_OFFSET_MIN:g} min incipient phase added to all "
+              "reported times (CRE equivalent time unaffected).")
 
     device_columns = [c for c in df.columns if c != time_col]
     groups = build_location_groups(device_columns)
