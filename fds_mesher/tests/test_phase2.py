@@ -71,7 +71,7 @@ class Phase2(unittest.TestCase):
 
     def test_seed_surf(self):
         txt = cases.rock_tunnel().replace("SURF_ID='OPEN'", "SURF_ID='SUPPLY'", 1)
-        res = fm.run(txt, 0.2, block=(10, 5, 5), seed_surf=["supply"])
+        res = fm.run(txt, 0.2, block=(10, 5, 5), min_block=5, seed_surf=["supply"])
         self.assertEqual(len(res.reach.vents), 2)
         with self.assertRaises(ValueError):
             fm.run(txt.replace("SURF_ID='OPEN'", "SURF_ID='X'"), 0.2, block=(10, 5, 5))

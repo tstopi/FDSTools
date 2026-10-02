@@ -11,6 +11,7 @@ must stay on the outside of the retained union, which is why the lattice may
 overhang the domain only on faces that carry neither vents nor reachable air.
 """
 
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -103,19 +104,101 @@ def axis_ok(n, b, o, low_free, high_free):
     return high == 0 or high_free
 
 
-def fixed_layout(reachable, free, block, offset=(0, 0, 0)):
-    """Layout for a user-given block size (phase 1: zero offset)."""
-    for a in range(3):
-        if not is_smooth(block[a]):
-            raise ValueError(f"block size {block[a]} is not 2^a 3^b 5^c")
-        if not axis_ok(reachable.shape[a], block[a], offset[a],
-                       *free[a]):
-            raise ValueError(
-                f"block {tuple(block)} does not tile axis {'xyz'[a]} "
-                f"({reachable.shape[a]} cells) flush to a face that carries "
-                "a vent or reachable air")
-    return Layout(tuple(block), tuple(-o for o in offset),
-                  retained_blocks(reachable, block, offset))
+def smooth_numbers(lo, hi):
+    """Integers in [lo, hi] of the form 2^a 3^b 5^c."""
+    return [n for n in range(max(lo, 1), hi + 1) if is_smooth(n)]
+
+
+def candidates(shape, cells_per_mesh, min_block, max_aspect, block=None):
+    """Block-size triples (bi,bj,bk), most plausible window first.
+
+    Triples have cell count in [0.5, 1.5] x cells_per_mesh and aspect
+    <= max_aspect; the window and aspect limit are relaxed if nothing fits.
+    """
+    if block is not None:
+        for a in range(3):
+            if not is_smooth(block[a]):
+                raise ValueError(f"block size {block[a]} is not 2^a 3^b 5^c")
+        return [tuple(int(x) for x in block)]
+    axes = []
+    for n in shape:
+        v = smooth_numbers(min(min_block, n), n)
+        axes.append(v or [max(smooth_numbers(1, n))])
+    g = np.stack([m.ravel() for m in np.meshgrid(*axes, indexing="ij")], axis=1)
+    cells = g.prod(axis=1)
+    aspect = g.max(axis=1) / g.min(axis=1)
+    for f in (1, 2, 4, 8, 16):
+        ok = (cells >= 0.5 * cells_per_mesh / f) & \
+             (cells <= 1.5 * cells_per_mesh * f) & (aspect <= max_aspect * f)
+        if ok.any():
+            break
+    else:
+        return [tuple(int(max(a)) for a in axes)]
+    g, cells = g[ok], cells[ok]
+    keep = np.argsort(np.abs(np.log(cells / cells_per_mesh)))[:1500]
+    return [tuple(int(x) for x in r) for r in g[keep]]
+
+
+def axis_offsets(n, b, step, low_free, high_free):
+    """Valid lattice overhangs (cells) on one axis. step 0 means flush only."""
+    cand = {0} if step <= 0 else set(range(0, b, step)) | {(-n) % b}
+    return sorted(o for o in cand if axis_ok(n, b, o, low_free, high_free))
+
+
+def search(reachable, free, *, cells_per_mesh=300_000, max_aspect=8.0,
+           min_block=8, block=None, offset_step=None, time_budget=110.0):
+    """Choose block size and lattice offset minimising retained cells.
+
+    Candidates are evaluated hierarchically (any() reduction along x, then y,
+    then z) with caching of the partial reductions; a partial result gives a
+    lower bound on the retained block count (each non-empty (x,y) column
+    needs its own block), which prunes against the incumbent. Score is
+    (cells, blocks, aspect). Returns (Layout, info dict).
+    """
+    shape = reachable.shape
+    by = {}
+    for bi, bj, bk in candidates(shape, cells_per_mesh, min_block,
+                                 max_aspect, block):
+        by.setdefault(bi, {}).setdefault(bj, []).append(bk)
+    t0 = time.time()
+    best, n_eval, truncated = None, 0, False
+
+    def steps(b):
+        return max(1, b // 8) if offset_step is None else offset_step
+
+    for bi in sorted(by):
+        offs_i = axis_offsets(shape[0], bi, steps(bi), *free[0])
+        for oi in offs_i:
+            if time.time() - t0 > time_budget:
+                truncated = True
+                break
+            r1 = _reduce(reachable, 0, bi, oi)
+            for bj, ks in by[bi].items():
+                for oj in axis_offsets(shape[1], bj, steps(bj), *free[1]):
+                    r2 = _reduce(r1, 1, bj, oj)
+                    nnz2 = int(np.count_nonzero(r2.any(axis=2)))   # non-empty columns
+                    for bk in ks:
+                        cells = bi * bj * bk
+                        if best is not None and nnz2 * cells > best[0][0]:
+                            continue
+                        for ok in axis_offsets(shape[2], bk, steps(bk),
+                                               *free[2]):
+                            nb = int(np.count_nonzero(_reduce(r2, 2, bk, ok)))
+                            n_eval += 1
+                            asp = max(bi, bj, bk) / min(bi, bj, bk)
+                            key = (nb * cells, nb, asp)
+                            if best is None or key < best[0]:
+                                best = (key, (bi, bj, bk), (oi, oj, ok))
+        if truncated:
+            break
+    if best is None:
+        raise ValueError(
+            "no block size tiles the domain flush to the vent / reachable-air "
+            "faces; try another --dx, --block or --min-block")
+    _, b, off = best
+    lay = Layout(b, tuple(-o for o in off), retained_blocks(reachable, b, off))
+    return lay, {"evaluated": n_eval, "seconds": time.time() - t0,
+                 "truncated": truncated}
 
 
 # ============================================================

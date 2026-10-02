@@ -99,3 +99,11 @@ def geom_tunnel(dx=0.2):
     s += geom_text(*tube_geom())
     s += open_vent((0, 0, 3.3, 4.7, 3.3, 4.7)) + open_vent((16, 16, 3.3, 4.7, 3.3, 4.7))
     return s
+
+
+def odd_rock_tunnel(dx=0.2):
+    """Rock tunnel in a 16 x 7.4 x 7 box: y has 37 cells; the tunnel spans y 0.2..7.2."""
+    s = head((0, 16, 0, 7.4, 0, 7), (80, 37, 35))
+    s += obst((0, 16, 0, 7.4, 0, 7)) + hole((0, 16, 0.2, 7.2, 3, 5))
+    s += open_vent((0, 0, 0.2, 7.2, 3, 5)) + open_vent((16, 16, 0.2, 7.2, 3, 5))
+    return s

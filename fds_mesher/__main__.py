@@ -23,14 +23,24 @@ def main(argv=None):
                     "OPEN vents.")
     ap.add_argument("input")
     ap.add_argument("--dx", type=float, required=True, help="cell size (m)")
+    ap.add_argument("--cells-per-mesh", type=int, default=300_000)
+    ap.add_argument("--max-aspect", type=float, default=8.0)
+    ap.add_argument("--min-block", type=int, default=8)
     ap.add_argument("--block", type=lambda s: _csv(s, 3, int),
-                    help="fixed block size in cells: bi,bj,bk")
+                    help="fixed block size in cells bi,bj,bk (skips the "
+                         "block-size search; offsets are still searched)")
+    ap.add_argument("--offset-step", type=int,
+                    help="lattice offset step in cells (default max(1,b//8); "
+                         "0 = zero offset only)")
     ap.add_argument("--bounds", type=lambda s: _csv(s, 6))
     ap.add_argument("--origin", type=lambda s: _csv(s, 3))
     ap.add_argument("--seed-surf", nargs="*", default=[], metavar="SURF_ID")
     ap.add_argument("--leak-fraction", type=float, default=0.9)
     ap.add_argument("--max-voxels", type=float, default=2e9)
-    ap.add_argument("--mpi", type=int)
+    ap.add_argument("--fill-overhang", action=argparse.BooleanOptionalAction,
+                    default=True, help="emit solid OBSTs for mesh cells "
+                    "outside the voxel domain (default on)")
+    ap.add_argument("--mpi", type=int, help="assign MPI_PROCESS to N processes")
     ap.add_argument("--snippet", action="store_true")
     ap.add_argument("-o", "--output")
     ap.add_argument("--dump-voxels", metavar="OUT.npz")
@@ -40,7 +50,10 @@ def main(argv=None):
         text = Path(a.input).read_text()
         res = run(text, a.dx, bounds=a.bounds, origin=a.origin,
                   seed_surf=a.seed_surf, leak_fraction=a.leak_fraction,
-                  block=a.block, max_voxels=a.max_voxels, mpi=a.mpi)
+                  cells_per_mesh=a.cells_per_mesh, max_aspect=a.max_aspect,
+                  min_block=a.min_block, block=a.block,
+                  offset_step=a.offset_step, max_voxels=a.max_voxels,
+                  fill_overhang=a.fill_overhang, mpi=a.mpi)
     except (OSError, ValueError, NotImplementedError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
