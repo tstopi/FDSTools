@@ -15,7 +15,7 @@ caverns and ventilation networks.
 | Cell size `dx` | **User input** (`--dx`). Cubic cells. The tool never chooses dx. |
 | Flood-fill seeds | **OPEN vents only** (`SURF_ID='OPEN'`). Optional `--seed-surf` adds other SURF IDs (e.g. supply/exhaust). The domain box is treated as solid. **No margin. No automatic portal detection.** |
 | Geometry style | Both "solid rock" models and "thin-wall shell" models must work. |
-| Mesh layout | **Identical blocks** (same IJK, same size) on one lattice. **No merging.** |
+| Mesh layout | **Identical blocks** (same IJK, same size) on one lattice. **No merging.** Exception (added after first use): on flush faces the last block per axis is cut or merged to fit. |
 | Dependencies | `numpy`, `scipy` only. No trimesh, no VTK. |
 | What is optimised | Block size in cells (`bi,bj,bk`) and lattice origin shift. Objective = retained cells. |
 

@@ -20,19 +20,20 @@ def _xb(grid, lo, hi):
 
 def mesh_lines(grid, layout, mpi=None):
     """List of &MESH lines, one per retained block."""
-    starts = layout.block_starts()
-    b = np.array(layout.b)
-    n = len(starts)
+    lo, hi = layout.block_boxes()
+    n = len(lo)
     # sort so the dominant axis (most blocks) is the slowest key
     order = np.argsort(layout.blocks.shape)
-    keys = tuple(starts[:, a] for a in order)        # last key = primary
-    starts = starts[np.lexsort(keys)]
+    keys = tuple(lo[:, a] for a in order)            # last key = primary
+    srt = np.lexsort(keys)
+    lo, hi = lo[srt], hi[srt]
     width = max(4, len(str(n)))
     lines = []
-    for m, s in enumerate(starts):
+    for m, (l, h) in enumerate(zip(lo, hi)):
+        ijk = h - l
         mp = f", MPI_PROCESS={m * mpi // n}" if mpi else ""
         lines.append(f"&MESH ID='M_{m + 1:0{width}d}', "
-                     f"IJK={b[0]},{b[1]},{b[2]}, XB={_xb(grid, s, s + b)}{mp} /")
+                     f"IJK={ijk[0]},{ijk[1]},{ijk[2]}, XB={_xb(grid, l, h)}{mp} /")
     return lines
 
 
@@ -43,10 +44,9 @@ def overhang_boxes(grid, layout):
     touch along an axis with identical other extents are merged.
     """
     n = np.array(grid.shape)
-    b = np.array(layout.b)
     boxes = []
-    for s in layout.block_starts():
-        lo, hi = s.copy(), s + b
+    for lo, hi in zip(*layout.block_boxes()):
+        lo, hi = lo.copy(), hi.copy()
         if (lo >= 0).all() and (hi <= n).all():
             continue
         for a in range(3):
@@ -125,9 +125,14 @@ def format_report(res, dx):
     g, lay, rr = res.grid, res.layout, res.reach
     size = g.upper() - g.origin
     full = g.n_voxels
-    total = lay.n_blocks * lay.cells_per_block
+    total = lay.total_cells
     ext = [n * dx for n in lay.b]
     off = tuple(-s for s in lay.start)
+    lo, hi = lay.block_boxes()
+    per = np.prod(hi - lo, axis=1)
+    odd = lay.odd_sizes()
+    odd_txt = ", ".join(f"{'xyz'[a]}: {'/'.join(map(str, v))}"
+                        for a, v in enumerate(odd) if v)
     out = [
         f"dx: {dx:g} m   domain: {size[0]:g} x {size[1]:g} x {size[2]:g} m   "
         f"bounds from: {g.bounds_source}",
@@ -137,13 +142,16 @@ def format_report(res, dx):
         f"block: {lay.b[0]} x {lay.b[1]} x {lay.b[2]} cells "
         f"({ext[0]:g} x {ext[1]:g} x {ext[2]:g} m)   overhang: {off} cells",
         f"meshes: {lay.n_blocks}   total cells: {_count(total)}   "
-        f"cells/mesh: {lay.cells_per_block}",
+        f"cells/mesh: {per.min()}" + (f"-{per.max()}" if per.max() > per.min()
+                                      else ""),
         f"efficiency (reachable/meshed): {100 * rr.n_reachable / total:.0f} %   "
         f"removed vs. full box: {max(0, 100 * (1 - total / full)):.0f} %",
         f"layout search: {res.info.get('evaluated', 0)} candidates in "
         f"{res.info.get('seconds', 0):.1f} s",
         f"est. memory: ~{total * 1e3 / 1e9:.1f} GB (1 kB/cell)",
     ]
+    if odd_txt:
+        out.insert(3, f"end blocks cut/merged to fit flush faces: {odd_txt} cells")
     out += [f"WARNING: {w}" for w in res.warnings]
     out += [f"VALIDATION FAILED: {e}" for e in res.errors]
     return "\n".join(out)

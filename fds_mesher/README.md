@@ -1,7 +1,8 @@
 # fds_mesher
 
 Turns an FDS input file into `&MESH` lines that tile only the air reachable from
-OPEN vents, using identical, aligned blocks. Target: tunnels, stations, caverns
+OPEN vents, using identical, aligned blocks (except one end block per axis
+where needed to fit the domain). Target: tunnels, stations, caverns
 and ventilation networks. Needs `numpy` and `scipy` only.
 
 ## Install
@@ -39,14 +40,23 @@ domain box is treated as solid.
 
 Exit codes: 0 ok, 1 input error, 2 self-validation failure. The self-validation
 (every reachable voxel in exactly one block, no overlap, bounds on the dx grid,
-vents on the exterior of the retained meshes, IJK factors 2/3/5) runs on every
-invocation, before writing.
+vents on the exterior of the retained meshes) runs on every invocation, before
+writing. An IJK that does not factor into 2, 3, 5 is reported as a warning.
 
 `overhang` in the report is how many cells the block lattice starts before the
 domain minimum on each axis. The lattice may overhang only on domain faces with
 no OPEN vent and no reachable air; overhanging mesh cells are filled with
-`&OBST` (disable with `--no-fill-overhang`). `--mpi N` assigns `MPI_PROCESS`
-in N contiguous runs along the axis with the most blocks.
+`&OBST` (disable with `--no-fill-overhang`).
+
+On faces that must stay flush (OPEN vent or reachable air on them) the axis
+length rarely divides by the block size. There the last block along that axis
+is cut to end at the face, or, if the remainder is under half a block, merged
+into the previous block. So each axis has at most one non-nominal block size;
+the report lists them under "end blocks", and they may not factor into 2, 3, 5
+(warned; FDS still runs, the pressure solve on those meshes is a bit slower).
+
+`--mpi N` assigns `MPI_PROCESS` in N contiguous runs along the axis with the
+most blocks.
 
 Tests: `python -m unittest discover fds_mesher/tests -v`.
 
