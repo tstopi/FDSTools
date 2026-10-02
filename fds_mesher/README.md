@@ -4,10 +4,22 @@ Turns an FDS input file into `&MESH` lines that tile only the air reachable from
 OPEN vents, using identical, aligned blocks. Target: tunnels, stations, caverns
 and ventilation networks. Needs `numpy` and `scipy` only.
 
+## Install
+
+From the FDSTools repository root:
+
+```
+pip install -e .
+```
+
+This installs `numpy`/`scipy` and an `fds-mesher` command usable from any
+folder (`-e` keeps it linked to the checkout, so `git pull` updates it).
+Without installing, run `python -m fds_mesher` from the repository root.
+
 ## Usage
 
 ```
-python -m fds_mesher INPUT.fds --dx 0.2
+fds-mesher INPUT.fds --dx 0.2
     [--cells-per-mesh 300000] [--max-aspect 8] [--min-block 8]
     [--block bi,bj,bk]                 # fixed block size, skips the size search
     [--bounds x0,x1,y0,y1,z0,z1] [--origin x,y,z]

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fds-mesher"
+version = "0.1.0"
+description = "Automatic FDS &MESH generator that meshes only the air reachable from OPEN vents"
+readme = "fds_mesher/README.md"
+requires-python = ">=3.8"
+dependencies = ["numpy", "scipy"]
+
+[project.scripts]
+fds-mesher = "fds_mesher.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["fds_mesher*"]
