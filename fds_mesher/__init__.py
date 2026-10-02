@@ -43,6 +43,10 @@ def run(text, dx, *, bounds=None, origin=None, seed_surf=(), leak_fraction=0.9,
     if info["truncated"]:
         warns.append(f"layout search hit the {time_budget:g} s budget; "
                      "result may not be optimal")
+    bad = _layout.non_smooth(lay)
+    if bad:
+        warns.append("mesh IJK not factorable by 2, 3, 5 (slower FFT pressure "
+                     "solve): " + ", ".join("x".join(map(str, t)) for t in bad))
     snippet = writer.build_snippet(grid, lay, mpi, fill_overhang)
     errors = _layout.validate(snippet, grid, rr.reachable, vents)
     output = writer.merge_into_text(model, snippet)

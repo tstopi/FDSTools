@@ -9,6 +9,11 @@ contain no reachable voxel therefore never turns reachable air into a domain
 boundary. The only other boundary that matters is where OPEN vents sit; they
 must stay on the outside of the retained union, which is why the lattice may
 overhang the domain only on faces that carry neither vents nor reachable air.
+
+On a face that must stay flush, the lattice is flush at the low end (offset 0)
+and the last block on the high end is cut to end at the face. A remainder under
+half a block is merged into the previous block instead, so every axis has at
+most one block that differs from the nominal size.
 """
 
 import time
@@ -21,11 +26,16 @@ from .parse import get_floats, parse_namelists
 
 @dataclass
 class Layout:
-    """Identical blocks b=(bi,bj,bk) on a lattice starting at index `start`
-    (<= 0 per axis; negative means overhang). `blocks` is the retained mask."""
+    """Nominal block size b=(bi,bj,bk); `edges[a]` are the block boundaries
+    (cell indices, may lie outside [0, n] where the lattice overhangs) along
+    axis a. `blocks` is the retained mask."""
     b: tuple
-    start: tuple
+    edges: tuple
     blocks: np.ndarray
+
+    @property
+    def start(self):
+        return tuple(int(e[0]) for e in self.edges)
 
     @property
     def n_blocks(self):
@@ -35,10 +45,26 @@ class Layout:
     def cells_per_block(self):
         return int(np.prod(self.b))
 
-    def block_starts(self):
-        """(m,3) integer index of each retained block's low corner."""
+    @property
+    def total_cells(self):
+        return _cells(self.blocks, self.edges)
+
+    def odd_sizes(self):
+        """Per axis: block sizes (cells) that differ from the nominal size."""
+        return [sorted({int(d) for d in np.diff(e)} - {self.b[a]})
+                for a, e in enumerate(self.edges)]
+
+    def block_boxes(self):
+        """(lo, hi): (m,3) integer index corners of each retained block."""
         idx = np.argwhere(self.blocks)
-        return np.array(self.start) + idx * np.array(self.b)
+        lo = np.stack([self.edges[a][idx[:, a]] for a in range(3)], axis=1)
+        hi = np.stack([self.edges[a][idx[:, a] + 1] for a in range(3)], axis=1)
+        return lo, hi
+
+
+def _cells(mask, edges):
+    s = [np.diff(e).astype(np.int64) for e in edges]
+    return int(np.einsum("ijk,i,j,k->", mask.astype(np.int64), *s))
 
 
 def is_smooth(n):
@@ -64,44 +90,36 @@ def free_faces(reachable, vents):
     return free
 
 
-def _reduce(a, axis, b, o):
-    """any() over blocks of size b along axis, lattice start at -o."""
-    n = a.shape[axis]
+def axis_edges(n, b, o, low_free, high_free):
+    """Block boundaries on one axis for lattice start -o, block size b.
 
-    def sl(s, e):
-        idx = [slice(None)] * 3
-        idx[axis] = slice(s, e)
-        return a[tuple(idx)]
-
-    parts, pos = [], 0
-    if o > 0:
-        pos = min(b - o, n)
-        parts.append(sl(0, pos).any(axis=axis, keepdims=True))
-    m = (n - pos) // b
-    if m > 0:
-        shp = list(a.shape)
-        shp[axis:axis + 1] = [m, b]
-        parts.append(sl(pos, pos + m * b).reshape(shp).any(axis=axis + 1))
-        pos += m * b
-    if pos < n:
-        parts.append(sl(pos, n).any(axis=axis, keepdims=True))
-    return parts[0] if len(parts) == 1 else np.concatenate(parts, axis=axis)
+    None if o > 0 on a face that must stay flush. On a flush high face the
+    last block is cut at n, or merged into the previous one when the
+    remainder is under half a block.
+    """
+    if o > 0 and not low_free:
+        return None
+    m = -(-(n + o) // b)
+    e = -o + b * np.arange(m + 1)
+    if e[-1] > n and not high_free:
+        if m > 1 and n - e[-2] < b / 2:
+            e = e[:-1]
+        e[-1] = n
+    return e
 
 
-def retained_blocks(reachable, b, offset):
-    """Retained-block mask for block size b and lattice offsets (cells)."""
+def _reduce(a, axis, edges):
+    """any() over the blocks given by `edges` along axis."""
+    starts = np.clip(edges[:-1], 0, a.shape[axis])
+    return np.logical_or.reduceat(a, starts, axis=axis)
+
+
+def retained_blocks(reachable, edges):
+    """Retained-block mask for per-axis block edges."""
     r = reachable
     for a in range(3):
-        r = _reduce(r, a, b[a], offset[a])
+        r = _reduce(r, a, edges[a])
     return r
-
-
-def axis_ok(n, b, o, low_free, high_free):
-    """Overhang rule for one axis: lattice start -o, block size b."""
-    if o > 0 and not low_free:
-        return False
-    high = -(-(n + o) // b) * b - n - o
-    return high == 0 or high_free
 
 
 def smooth_numbers(lo, hi):
@@ -140,9 +158,11 @@ def candidates(shape, cells_per_mesh, min_block, max_aspect, block=None):
 
 
 def axis_offsets(n, b, step, low_free, high_free):
-    """Valid lattice overhangs (cells) on one axis. step 0 means flush only."""
+    """Valid lattice overhangs (cells) -> edges on one axis, as (o, edges)
+    pairs. step 0 means flush only."""
     cand = {0} if step <= 0 else set(range(0, b, step)) | {(-n) % b}
-    return sorted(o for o in cand if axis_ok(n, b, o, low_free, high_free))
+    out = [(o, axis_edges(n, b, o, low_free, high_free)) for o in sorted(cand)]
+    return [(o, e) for o, e in out if e is not None]
 
 
 def search(reachable, free, *, cells_per_mesh=300_000, max_aspect=8.0,
@@ -167,36 +187,39 @@ def search(reachable, free, *, cells_per_mesh=300_000, max_aspect=8.0,
         return max(1, b // 8) if offset_step is None else offset_step
 
     for bi in sorted(by):
-        offs_i = axis_offsets(shape[0], bi, steps(bi), *free[0])
-        for oi in offs_i:
+        for oi, ei in axis_offsets(shape[0], bi, steps(bi), *free[0]):
             if time.time() - t0 > time_budget:
                 truncated = True
                 break
-            r1 = _reduce(reachable, 0, bi, oi)
+            r1 = _reduce(reachable, 0, ei)
+            si = np.diff(ei)
             for bj, ks in by[bi].items():
-                for oj in axis_offsets(shape[1], bj, steps(bj), *free[1]):
-                    r2 = _reduce(r1, 1, bj, oj)
-                    nnz2 = int(np.count_nonzero(r2.any(axis=2)))   # non-empty columns
+                for oj, ej in axis_offsets(shape[1], bj, steps(bj), *free[1]):
+                    r2 = _reduce(r1, 1, ej)
+                    cols = r2.any(axis=2)                    # non-empty columns
+                    area = int(np.einsum("ij,i,j->", cols.astype(np.int64),
+                                         si, np.diff(ej)))
                     for bk in ks:
-                        cells = bi * bj * bk
-                        if best is not None and nnz2 * cells > best[0][0]:
+                        offs_k = axis_offsets(shape[2], bk, steps(bk), *free[2])
+                        lower = area * min(int(np.diff(e).min()) for _, e in offs_k)
+                        if best is not None and lower > best[0][0]:
                             continue
-                        for ok in axis_offsets(shape[2], bk, steps(bk),
-                                               *free[2]):
-                            nb = int(np.count_nonzero(_reduce(r2, 2, bk, ok)))
+                        for ok, ek in offs_k:
+                            mask = _reduce(r2, 2, ek)
+                            edges = (ei, ej, ek)
                             n_eval += 1
                             asp = max(bi, bj, bk) / min(bi, bj, bk)
-                            key = (nb * cells, nb, asp)
+                            key = (_cells(mask, edges),
+                                   int(np.count_nonzero(mask)), asp)
                             if best is None or key < best[0]:
-                                best = (key, (bi, bj, bk), (oi, oj, ok))
+                                best = (key, (bi, bj, bk), edges, mask)
         if truncated:
             break
     if best is None:
-        raise ValueError(
-            "no block size tiles the domain flush to the vent / reachable-air "
-            "faces; try another --dx, --block or --min-block")
-    _, b, off = best
-    lay = Layout(b, tuple(-o for o in off), retained_blocks(reachable, b, off))
+        raise ValueError("no valid block layout found; try another --dx, "
+                         "--block or --min-block")
+    _, b, edges, mask = best
+    lay = Layout(b, edges, mask)
     return lay, {"evaluated": n_eval, "seconds": time.time() - t0,
                  "truncated": truncated}
 
@@ -223,19 +246,17 @@ def validate(text, grid, reachable, vents):
             errs.append(f"{nl.params.get('ID')}: bounds are not multiples of dx "
                         "from the origin")
         lo[m], hi[m] = np.round(f[:, 0]), np.round(f[:, 1])
-    # (4) IJK factorisation and consistency with XB
+    # (4) IJK consistent with XB (2-3-5 factors are checked in non_smooth)
     for m in range(len(meshes)):
-        if not all(is_smooth(int(n)) for n in ijk[m]):
-            errs.append(f"mesh {m + 1}: IJK {tuple(ijk[m])} not 2^a 3^b 5^c")
         if (hi[m] - lo[m] != ijk[m]).any():
             errs.append(f"mesh {m + 1}: IJK does not match XB at dx")
-    # (2) identical blocks on one lattice, so no overlap unless duplicated
-    if (ijk != ijk[0]).any():
-        errs.append("blocks differ in size")
-    elif ((lo - lo[0]) % ijk[0]).any():
-        errs.append("blocks are not on a common lattice")
-    elif len(np.unique(lo, axis=0)) != len(lo):
-        errs.append("duplicate (overlapping) blocks")
+    # (2) no two blocks overlap (including outside the voxel domain)
+    for m in range(len(meshes) - 1):
+        over = (np.maximum(lo[m], lo[m + 1:]) <
+                np.minimum(hi[m], hi[m + 1:])).all(axis=1)
+        if over.any():
+            errs.append(f"mesh {m + 1} overlaps mesh {m + 2 + int(np.argmax(over))}")
+            break
     if errs:
         return errs
     # (1) every reachable voxel in exactly one block
@@ -262,3 +283,10 @@ def validate(text, grid, reachable, vents):
             errs.append(f"vent at line {v.line} is not on the exterior of the "
                         "retained meshes (a block extends beyond it)")
     return errs
+
+
+def non_smooth(layout):
+    """Distinct retained-block IJK triples that are not all 2^a 3^b 5^c."""
+    lo, hi = layout.block_boxes()
+    return sorted({tuple(int(v) for v in r) for r in hi - lo
+                   if not all(is_smooth(int(v)) for v in r)})

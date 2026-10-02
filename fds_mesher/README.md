@@ -1,13 +1,26 @@
 # fds_mesher
 
 Turns an FDS input file into `&MESH` lines that tile only the air reachable from
-OPEN vents, using identical, aligned blocks. Target: tunnels, stations, caverns
+OPEN vents, using identical, aligned blocks (except one end block per axis
+where needed to fit the domain). Target: tunnels, stations, caverns
 and ventilation networks. Needs `numpy` and `scipy` only.
+
+## Install
+
+From the FDSTools repository root:
+
+```
+pip install -e .
+```
+
+This installs `numpy`/`scipy` and an `fds-mesher` command usable from any
+folder (`-e` keeps it linked to the checkout, so `git pull` updates it).
+Without installing, run `python -m fds_mesher` from the repository root.
 
 ## Usage
 
 ```
-python -m fds_mesher INPUT.fds --dx 0.2
+fds-mesher INPUT.fds --dx 0.2
     [--cells-per-mesh 300000] [--max-aspect 8] [--min-block 8]
     [--block bi,bj,bk]                 # fixed block size, skips the size search
     [--bounds x0,x1,y0,y1,z0,z1] [--origin x,y,z]
@@ -27,14 +40,23 @@ domain box is treated as solid.
 
 Exit codes: 0 ok, 1 input error, 2 self-validation failure. The self-validation
 (every reachable voxel in exactly one block, no overlap, bounds on the dx grid,
-vents on the exterior of the retained meshes, IJK factors 2/3/5) runs on every
-invocation, before writing.
+vents on the exterior of the retained meshes) runs on every invocation, before
+writing. An IJK that does not factor into 2, 3, 5 is reported as a warning.
 
 `overhang` in the report is how many cells the block lattice starts before the
 domain minimum on each axis. The lattice may overhang only on domain faces with
 no OPEN vent and no reachable air; overhanging mesh cells are filled with
-`&OBST` (disable with `--no-fill-overhang`). `--mpi N` assigns `MPI_PROCESS`
-in N contiguous runs along the axis with the most blocks.
+`&OBST` (disable with `--no-fill-overhang`).
+
+On faces that must stay flush (OPEN vent or reachable air on them) the axis
+length rarely divides by the block size. There the last block along that axis
+is cut to end at the face, or, if the remainder is under half a block, merged
+into the previous block. So each axis has at most one non-nominal block size;
+the report lists them under "end blocks", and they may not factor into 2, 3, 5
+(warned; FDS still runs, the pressure solve on those meshes is a bit slower).
+
+`--mpi N` assigns `MPI_PROCESS` in N contiguous runs along the axis with the
+most blocks.
 
 Tests: `python -m unittest discover fds_mesher/tests -v`.
 

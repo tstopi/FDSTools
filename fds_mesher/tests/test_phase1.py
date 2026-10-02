@@ -87,14 +87,14 @@ class Parser(unittest.TestCase):
     def test_11_round_trip(self):
         res = fm.run(cases.rock_tunnel(), 0.2, block=(10, 5, 5))
         again = parse.parse_text(res.output)
-        self.assertEqual(len(again.meshes), len(res.layout.block_starts()))
+        lo, hi = res.layout.block_boxes()
+        self.assertEqual(len(again.meshes), len(lo))
         self.assertEqual(sum(1 for ln in res.output.splitlines()
                              if ln.startswith("!MESH-AUTO")), 1)
         got = sorted(tuple(m.xb) for m in again.meshes)
-        starts = res.layout.block_starts()
         g = res.grid
-        want = sorted(tuple(g.coord(s[a] + o, a) for a in range(3)
-                            for o in (0, res.layout.b[a])) for s in starts)
+        want = sorted(tuple(g.coord(c[a], a) for a in range(3) for c in (l, h))
+                      for l, h in zip(lo, hi))
         want = [(w[0], w[1], w[2], w[3], w[4], w[5]) for w in want]
         self.assertEqual(len(got), len(want))
         for a, b in zip(got, sorted(want)):
