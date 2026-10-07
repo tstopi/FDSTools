@@ -1,0 +1,20 @@
+{
+  "name": "t² ultrafast, 5 MW",
+  "description": "NFPA/SFPE ultrafast t² growth (1055 kW at 75 s) to a 5 MW plateau. Generic growth rate, not a specific fuel package; set the fuel and area to suit.",
+  "curve": {
+    "type": "power-law",
+    "exponent": 2.0,
+    "growth_time": 75.0,
+    "peak_hrr": 5000.0,
+    "duration": 1800.0,
+    "q_ref": 1055.0,
+    "t_start": 0.0
+  },
+  "fuels": [
+    [
+      "Polyurethane foam (flexible)",
+      1.0
+    ]
+  ],
+  "area": 4.0
+}
