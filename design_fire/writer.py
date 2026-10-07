@@ -79,6 +79,9 @@ class DesignFire:
         if hasattr(c, "alpha"):
             out.append(f"! alpha {c.alpha:.5g} kW/s2, peak reached at "
                        f"{c.t_peak:.0f} s")
+        if getattr(c, "decay_start", None) is not None:
+            out.append(f"! linear decay from {c.decay_start:g} s to zero at "
+                       f"{c.t_end:g} s")
         return "\n".join(out)
 
     def _ramp(self):

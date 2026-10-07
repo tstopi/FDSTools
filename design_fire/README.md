@@ -20,7 +20,9 @@ model. Put `SURF_ID='FIRE'` on the burner `&VENT` or `&OBST` yourself.
 - **Curve.** t² growth (`Q = αt²`) to the peak HRR, then a plateau until the
   duration. Growth rates are the NFPA/SFPE slow, medium, fast and ultrafast
   values (1055 kW at 600, 300, 150, 75 s) or a custom α. `HRRPUA` is the peak
-  HRR divided by the fire area and `RAMP_Q` scales it in time.
+  HRR divided by the fire area and `RAMP_Q` scales it in time. An optional
+  linear decay starts at a set time and takes the HRR from its value there
+  to zero over the decay duration.
 - **Fuels.** Formula, effective heat of combustion and CO/soot yields from the
   SFPE Handbook (Tewarson's tables), in `fuels.py`. Check them against the
   edition you cite before relying on them.

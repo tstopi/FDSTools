@@ -43,6 +43,39 @@ class Curves(unittest.TestCase):
         self.assertAlmostEqual(pts[-1][0], 300)
         self.assertLess(pts[-1][1], 1.0)
 
+    def test_linear_decay_after_plateau(self):
+        c = d.TSquaredCurve(d.GROWTH_RATES["fast"], 2000, 1200,
+                            decay_start=600, decay_time=400)
+        self.assertEqual(c.hrr(600), 2000)
+        self.assertAlmostEqual(c.hrr(800), 1000)
+        self.assertEqual(c.hrr(1000), 0)
+        self.assertEqual(c.hrr(1100), 0)
+        pts = c.points()
+        self.assertEqual(pts[-3:], [(600.0, 1.0), (1000.0, 0.0),
+                                    (1200.0, 0.0)])
+        # ramp reproduces the curve between its points
+        for (ta, fa), (tb, fb) in zip(pts[-3:], pts[-2:]):
+            tm = (ta + tb) / 2
+            self.assertAlmostEqual(c.hrr(tm) / 2000, (fa + fb) / 2)
+
+    def test_decay_before_peak(self):
+        c = d.TSquaredCurve(d.GROWTH_RATES["slow"], 5000, 1000,
+                            decay_start=300, decay_time=100)
+        q0 = c.alpha * 300 ** 2
+        self.assertAlmostEqual(c.hrr(350), q0 / 2)
+        pts = c.points()
+        self.assertAlmostEqual(pts[-3][0], 300)
+        self.assertEqual(pts[-2], (400.0, 0.0))
+        times = [t for t, _ in pts]
+        self.assertEqual(times, sorted(set(times)))
+
+    def test_decay_past_duration(self):
+        c = d.TSquaredCurve(d.GROWTH_RATES["fast"], 2000, 700,
+                            decay_start=600, decay_time=400)
+        pts = c.points()
+        self.assertEqual(pts[-1][0], 700)
+        self.assertAlmostEqual(pts[-1][1], 0.75)
+
     def test_registry(self):
         self.assertIs(d.CURVE_TYPES["t-squared"], d.TSquaredCurve)
 
@@ -51,6 +84,8 @@ class Curves(unittest.TestCase):
             d.TSquaredCurve(0, 1000, 600)
         with self.assertRaises(ValueError):
             d.TSquaredCurve(0.01, -1, 600)
+        with self.assertRaises(ValueError):
+            d.TSquaredCurve(0.01, 1000, 600, decay_start=300)
 
 
 class Reactions(unittest.TestCase):

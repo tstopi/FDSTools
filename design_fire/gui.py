@@ -89,6 +89,9 @@ class App(ttk.Frame):
         self.peak = tk.StringVar(value="2000")
         self.area = tk.StringVar(value="4")
         self.duration = tk.StringVar(value="1200")
+        self.decay = tk.BooleanVar(value=False)
+        self.decay_start = tk.StringVar(value="600")
+        self.decay_time = tk.StringVar(value="300")
         self.per_fuel = tk.BooleanVar(value=False)
         self.new_fuel = tk.StringVar(value="Polyurethane foam (flexible)")
         self.new_fraction = tk.StringVar(value="1")
@@ -99,9 +102,12 @@ class App(ttk.Frame):
         self._on_growth()
         self.add_fuel()
         for v in (self.curve_type, self.alpha, self.peak, self.area,
-                  self.duration, self.per_fuel):
+                  self.duration, self.decay_start, self.decay_time,
+                  self.per_fuel):
             v.trace_add("write", lambda *a: self.refresh())
         self.growth.trace_add("write", lambda *a: self._on_growth())
+        self.decay.trace_add("write", lambda *a: self._on_decay())
+        self._on_decay()
         self.refresh()
 
     # layout -------------------------------------------------------------
@@ -126,11 +132,17 @@ class App(ttk.Frame):
             ("Peak HRR (kW)", ttk.Entry(box, textvariable=self.peak, width=16)),
             ("Fire area (m²)", ttk.Entry(box, textvariable=self.area, width=16)),
             ("Duration (s)", ttk.Entry(box, textvariable=self.duration, width=16)),
+            ("", ttk.Checkbutton(box, text="Linear decay", variable=self.decay)),
+            ("Decay start (s)", ttk.Entry(box, textvariable=self.decay_start,
+                                          width=16)),
+            ("Decay duration (s)", ttk.Entry(box, textvariable=self.decay_time,
+                                             width=16)),
         ]
         for i, (label, widget) in enumerate(rows):
             ttk.Label(box, text=label).grid(row=i, column=0, sticky="w", pady=2)
             widget.grid(row=i, column=1, sticky="ew", pady=2)
         self.alpha_entry = rows[2][1]
+        self.decay_entries = [rows[7][1], rows[8][1]]
 
         box = ttk.LabelFrame(left, text="Fuel mixture (mass fractions)",
                              padding=6)
@@ -194,6 +206,12 @@ class App(ttk.Frame):
             self.alpha_entry.state(["disabled"])
         self.refresh()
 
+    def _on_decay(self):
+        state = "!disabled" if self.decay.get() else "disabled"
+        for e in self.decay_entries:
+            e.state([state])
+        self.refresh()
+
     def add_fuel(self):
         name = self.new_fuel.get()
         try:
@@ -228,8 +246,12 @@ class App(ttk.Frame):
                 raise ValueError(f"{label} must be a number") from None
 
         curve_cls = CURVE_TYPES[self.curve_type.get()]
+        decay = {}
+        if self.decay.get():
+            decay = dict(decay_start=num(self.decay_start, "Decay start"),
+                         decay_time=num(self.decay_time, "Decay duration"))
         curve = curve_cls(num(self.alpha, "alpha"), num(self.peak, "Peak HRR"),
-                          num(self.duration, "Duration"))
+                          num(self.duration, "Duration"), **decay)
         if not self.mixture:
             raise ValueError("Add at least one fuel")
         return DesignFire(curve, num(self.area, "Fire area"),
