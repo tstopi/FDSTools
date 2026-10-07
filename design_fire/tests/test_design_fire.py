@@ -1,8 +1,14 @@
+import json
 import math
 import re
+import tempfile
 import unittest
+from pathlib import Path
 
 import design_fire as d
+from design_fire import library as lib
+from design_fire.curves import curve_from_dict
+from design_fire.envelope import fit_power_law, pointwise_max
 from design_fire.fuels import formula_string
 from design_fire.reactions import SPECIES_FORMULA, molar_mass
 
@@ -77,7 +83,11 @@ class Curves(unittest.TestCase):
         self.assertAlmostEqual(pts[-1][1], 0.75)
 
     def test_registry(self):
-        self.assertIs(d.CURVE_TYPES["t-squared"], d.TSquaredCurve)
+        self.assertIs(d.CURVE_TYPES["power-law"], d.PowerLawCurve)
+        self.assertIs(d.CURVE_TYPES["tabulated"], d.TabulatedCurve)
+        c = d.TSquaredCurve(d.GROWTH_RATES["fast"], 2000, 600)
+        self.assertIsInstance(c, d.PowerLawCurve)
+        self.assertAlmostEqual(c.growth_time, 150)
 
     def test_bad_input(self):
         with self.assertRaises(ValueError):
@@ -86,6 +96,224 @@ class Curves(unittest.TestCase):
             d.TSquaredCurve(0.01, -1, 600)
         with self.assertRaises(ValueError):
             d.TSquaredCurve(0.01, 1000, 600, decay_start=300)
+
+
+class PowerLaw(unittest.TestCase):
+    def test_free_exponent_and_growth_time(self):
+        c = d.PowerLawCurve(3, 200, 4000, 900)
+        self.assertAlmostEqual(c.hrr(200), 1055)
+        self.assertAlmostEqual(c.hrr(100), 1055 / 8)
+        self.assertAlmostEqual(c.alpha, 1055 / 200 ** 3)
+        self.assertAlmostEqual(c.hrr(c.t_peak), 4000)
+        c = d.PowerLawCurve(1.5, 100, 500, 900, q_ref=250)
+        self.assertAlmostEqual(c.hrr(100), 250)
+
+    def test_start_time(self):
+        c = d.PowerLawCurve(2, 150, 2000, 900, t_start=60, n_growth=10)
+        self.assertEqual(c.hrr(60), 0)
+        self.assertAlmostEqual(c.hrr(210), 1055)
+        pts = c.points()
+        self.assertEqual(pts[:2], [(0.0, 0.0), (60.0, 0.0)])
+        self.assertAlmostEqual(pts[-2][0], c.t_peak)
+        self.assertEqual(len(pts), 13)
+
+    def test_decay_exponent(self):
+        c = d.PowerLawCurve(2, 150, 2000, 1200, decay_start=600,
+                            decay_time=400, decay_exponent=2)
+        self.assertAlmostEqual(c.hrr(800), 500)
+        self.assertEqual(c.hrr(1000), 0)
+        times = [t for t, _ in c.points()]
+        self.assertEqual(len([t for t in times if 600 <= t <= 1000]), 11)
+
+    def test_round_trip(self):
+        for c in (d.PowerLawCurve(2.5, 120, 3000, 900, q_ref=1000,
+                                  t_start=30, decay_start=500,
+                                  decay_time=200, decay_exponent=1.5),
+                  d.TabulatedCurve([(0, 0), (60, 100), (120, 0)])):
+            c2 = curve_from_dict(json.loads(json.dumps(c.to_dict())))
+            self.assertEqual(type(c2), type(c))
+            self.assertEqual(c2.points(), c.points())
+
+    def test_bad_input(self):
+        for kw in (dict(exponent=0), dict(growth_time=-1), dict(q_ref=0),
+                   dict(t_start=-5), dict(t_start=100, decay_start=50,
+                                          decay_time=10),
+                   dict(decay_start=50, decay_time=10, decay_exponent=0)):
+            args = dict(exponent=2, growth_time=150, peak_hrr=1000,
+                        duration=600)
+            args.update(kw)
+            with self.subTest(**kw), self.assertRaises(ValueError):
+                d.PowerLawCurve(**args)
+
+
+class Tabulated(unittest.TestCase):
+    def test_interpolation_and_holds(self):
+        c = d.TabulatedCurve([(10, 100), (20, 300), (40, 0)])
+        self.assertEqual(c.hrr(0), 100)
+        self.assertEqual(c.hrr(15), 200)
+        self.assertEqual(c.hrr(30), 150)
+        self.assertEqual(c.hrr(100), 0)
+        self.assertEqual(c.peak_hrr, 300)
+        self.assertEqual(c.duration, 40)
+        self.assertEqual(c.points()[1], (20.0, 1.0))
+
+    def test_bad_input(self):
+        for table in ([(0, 1)], [(0, 0), (0, 1)], [(0, 0), (10, -1)],
+                      [(0, 0), (10, 0)], [(-1, 0), (10, 5)]):
+            with self.subTest(table=table), self.assertRaises(ValueError):
+                d.TabulatedCurve(table)
+
+    def test_writer(self):
+        c = d.TabulatedCurve([(0, 0), (60, 500), (300, 1000), (600, 0)])
+        text = d.DesignFire(c, 2, [(d.FUELS["Propane"], 1)]).to_fds()
+        self.assertIn("HRRPUA=500.", text)
+        self.assertIn("&RAMP ID='FIRE_RAMP', T=60., F=0.5 /", text)
+        self.assertIn("! tabulated HRR, 4 points to 600 s", text)
+
+
+def grid(curves, n=2000):
+    t_end = max(c.duration for c in curves) * 1.1
+    return [t_end * i / n for i in range(n + 1)]
+
+
+def ramp(curve, t):
+    """HRR at ``t`` as FDS sees it: the &RAMP points joined linearly."""
+    from design_fire.curves import interpolate
+    return interpolate([(a, f * curve.peak_hrr) for a, f in curve.points()],
+                       t)
+
+
+class Envelope(unittest.TestCase):
+    def test_pointwise_max_with_crossing(self):
+        a = d.TabulatedCurve([(0, 0), (100, 1000), (200, 0)])
+        b = d.TabulatedCurve([(0, 0), (50, 200), (300, 700)])
+        env = pointwise_max([a, b])
+        times = [t for t, _ in env.table]
+        # crossing of a's fall and b's rise
+        self.assertTrue(any(150 < t < 200 for t in times))
+        self.assertNotIn(250.0, times)    # collinear point dropped
+        for t in grid([a, b]):
+            self.assertAlmostEqual(env.hrr(t), max(a.hrr(t), b.hrr(t)),
+                                   places=6)
+
+    def test_pointwise_max_of_power_laws(self):
+        cs = [d.PowerLawCurve(2, 300, 3000, 1200, decay_start=700,
+                              decay_time=300),
+              d.PowerLawCurve(3, 100, 1500, 900, t_start=40)]
+        env = pointwise_max(cs)
+        self.assertEqual(env.duration, 1200)
+        for t in grid(cs):
+            self.assertAlmostEqual(env.hrr(t), max(ramp(c, t) for c in cs),
+                                   places=6)
+
+    def test_fit_same_exponent(self):
+        cs = [d.PowerLawCurve(2, g, p, 1200) for g, p in
+              ((150, 2000), (300, 5000), (600, 3000))]
+        fit = fit_power_law(cs)
+        self.assertAlmostEqual(fit.growth_time, 150)
+        self.assertEqual(fit.peak_hrr, 5000)
+        self.assertIsNone(fit.decay_start)
+        self.assertEqual(fit.t_start, 0)
+
+    def test_fit_covers_with_decay(self):
+        cs = [d.TabulatedCurve([(0, 0), (60, 50), (180, 800), (360, 2400),
+                                (480, 2000), (720, 600), (1080, 0)]),
+              d.PowerLawCurve(2, 300, 1500, 1000, decay_start=600,
+                              decay_time=300, decay_exponent=2),
+              d.PowerLawCurve(3, 200, 1200, 800, t_start=30,
+                              decay_start=500, decay_time=200)]
+        for m in (1, 2, 0.5):
+            with self.subTest(decay_exponent=m):
+                fit = fit_power_law(cs, exponent=2, decay_exponent=m)
+                self.assertEqual(fit.peak_hrr, 2400)
+                self.assertEqual(fit.decay_start, 360)
+                self.assertEqual(fit.duration, 1080)
+                for t in grid(cs):
+                    if t < 60:      # straight rise from zero, see docstring
+                        continue
+                    for c in cs:
+                        self.assertGreaterEqual(fit.hrr(t) + 1e-6, c.hrr(t),
+                                                msg=(t, c.name))
+
+    def test_fit_tight(self):
+        # the decay touches the tabulated curve at 480 s
+        c = d.TabulatedCurve([(0, 0), (360, 2400), (480, 2000), (1080, 0)])
+        fit = fit_power_law([c])
+        self.assertAlmostEqual(fit.hrr(480), 2000)
+        self.assertAlmostEqual(fit.t_end, 1080)
+
+    def test_fit_delayed_start(self):
+        cs = [d.PowerLawCurve(2, 150, 2000, 900, t_start=120),
+              d.PowerLawCurve(2, 300, 2000, 900, t_start=200)]
+        fit = fit_power_law(cs)
+        self.assertEqual(fit.t_start, 120)
+        self.assertAlmostEqual(fit.growth_time, 150)
+
+    def test_fit_errors(self):
+        with self.assertRaises(ValueError):
+            fit_power_law([])
+        with self.assertRaises(ValueError):
+            fit_power_law([d.TabulatedCurve([(0, 100), (60, 200)])])
+
+
+class Library(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_builtins_load(self):
+        entries, errors = lib.load_library(user=self.dir)
+        self.assertEqual(errors, [])
+        self.assertGreaterEqual(len(entries), 5)
+        self.assertTrue(all(e.builtin for e in entries))
+        for e in entries:
+            d.DesignFire(e.curve, e.area or 1, e.components()).to_fds()
+
+    def test_save_load_delete(self):
+        curve = d.PowerLawCurve(2.5, 200, 3000, 900, t_start=10)
+        e = lib.LibraryEntry("Sofa / test", curve, [("PMMA", 0.3),
+                                                    ("Nylon", 0.7)], 2.5,
+                             "note")
+        path = lib.save_entry(e, self.dir)
+        self.assertEqual(path.name, "sofa_test.json")
+        entries, errors = lib.load_library(self.dir / "none", self.dir)
+        self.assertEqual(errors, [])
+        (e2,) = entries
+        self.assertEqual((e2.name, e2.fuels, e2.area, e2.description),
+                         (e.name, e.fuels, e.area, e.description))
+        self.assertEqual(e2.curve.points(), curve.points())
+        self.assertFalse(e2.builtin)
+        lib.delete_entry(e2)
+        self.assertFalse(path.exists())
+
+    def test_bad_files_reported(self):
+        (self.dir / "broken.json").write_text("{")
+        (self.dir / "fuel.json").write_text(json.dumps(
+            {"name": "x", "curve": {"type": "tabulated",
+                                    "table": [[0, 0], [1, 1]]},
+             "fuels": [["Unobtainium", 1]]}))
+        entries, errors = lib.load_library(self.dir / "none", self.dir)
+        self.assertEqual(entries, [])
+        self.assertEqual(len(errors), 2)
+
+    def test_builtin_cannot_be_deleted(self):
+        entries, _ = lib.load_library(user=self.dir)
+        with self.assertRaises(ValueError):
+            lib.delete_entry(entries[0])
+
+    def test_read_csv(self):
+        for text in ("time (s),HRR (kW)\n0,0\n60,500\n120,1000\n",
+                     "# test\nt;Q\n0;0\n60;500\n120;1000\n",
+                     "0\t0\n60\t500\n120\t1000\n",
+                     "0 0\n60  500\n120 1000\n"):
+            with self.subTest(text=text):
+                p = self.dir / "hrr.csv"
+                p.write_text(text)
+                c = lib.read_csv_curve(p)
+                self.assertEqual(c.table, [(0, 0), (60, 500), (120, 1000)])
 
 
 class Reactions(unittest.TestCase):

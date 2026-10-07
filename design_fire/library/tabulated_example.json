@@ -1,0 +1,68 @@
+{
+  "name": "Tabulated example",
+  "description": "Illustrative tabulated curve showing the format (time in s, HRR in kW). The shape is made up, not test data; replace it with measured data for design work.",
+  "curve": {
+    "type": "tabulated",
+    "table": [
+      [
+        0,
+        0
+      ],
+      [
+        60,
+        50
+      ],
+      [
+        120,
+        250
+      ],
+      [
+        180,
+        800
+      ],
+      [
+        240,
+        1600
+      ],
+      [
+        300,
+        2200
+      ],
+      [
+        360,
+        2400
+      ],
+      [
+        480,
+        2000
+      ],
+      [
+        600,
+        1200
+      ],
+      [
+        720,
+        600
+      ],
+      [
+        900,
+        200
+      ],
+      [
+        1080,
+        0
+      ]
+    ]
+  },
+  "fuels": [
+    [
+      "Polyurethane foam (flexible)",
+      0.6
+    ],
+    [
+      "Wood (red oak)",
+      0.4
+    ]
+  ],
+  "area": 2.0
+}

@@ -76,12 +76,7 @@ class DesignFire:
         out = [f"! Design fire: {c.name}, peak {c.peak_hrr:g} kW, "
                f"area {self.area:g} m2, HRRPUA {self.hrrpua:.4g} kW/m2",
                f"! Fuel: {mix}"]
-        if hasattr(c, "alpha"):
-            out.append(f"! alpha {c.alpha:.5g} kW/s2, peak reached at "
-                       f"{c.t_peak:.0f} s")
-        if getattr(c, "decay_start", None) is not None:
-            out.append(f"! linear decay from {c.decay_start:g} s to zero at "
-                       f"{c.t_end:g} s")
+        out += [f"! {line}" for line in c.describe()]
         return "\n".join(out)
 
     def _ramp(self):
