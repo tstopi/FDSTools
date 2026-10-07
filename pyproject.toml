@@ -13,5 +13,8 @@ dependencies = ["numpy", "scipy"]
 [project.scripts]
 fds-mesher = "fds_mesher.__main__:main"
 
+[project.gui-scripts]
+fds-design-fire = "design_fire.gui:main"
+
 [tool.setuptools.packages.find]
-include = ["fds_mesher*"]
+include = ["fds_mesher*", "design_fire*"]
